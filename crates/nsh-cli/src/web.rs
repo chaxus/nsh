@@ -121,7 +121,11 @@ pub(crate) fn package(
     let linked = match crate::rust_app::current() {
         Some(_) => linkable,
         None => {
-            let gates = linked_gates(built.native_use.as_ref());
+            let mut gates = linked_gates(built.native_use.as_ref());
+            // Apps register fonts only from their assets (`font("asset:/…")`).
+            if built.assets.iter().any(|asset| is_font(&asset.path)) {
+                gates.push("nsh_feature_fonts".into());
+            }
             let exports = prune::exports(&linkable)?;
             let keep: Vec<&str> = exports
                 .iter()

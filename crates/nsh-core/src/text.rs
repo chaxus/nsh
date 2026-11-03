@@ -1312,6 +1312,42 @@ pub fn font_data(data: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>, String> {
         .map_err(|e| format!("the WOFF font does not decompress: {e:?}"))
 }
 
+/// What turns a font file into the data the text engines register
+/// ([`font_data`]).
+#[cfg(target_arch = "wasm32")]
+pub type FontData = for<'a> fn(&'a [u8]) -> Result<std::borrow::Cow<'a, [u8]>, String>;
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    /// The decoder a web runtime linked: one built for an app that
+    /// registers no font leaves WOFF's decompressors out ([`set_font_data`]).
+    static FONT_DATA: std::cell::Cell<Option<FontData>> = const { std::cell::Cell::new(None) };
+}
+
+/// Sets this WebAssembly module's font decoder: the web runtime's gate for
+/// fonts sets it, so `wuff` and Brotli are linked only into the runtimes of
+/// apps that register fonts. The native backends always have [`font_data`].
+#[cfg(target_arch = "wasm32")]
+pub fn set_font_data(decode: FontData) {
+    FONT_DATA.with(|d| d.set(Some(decode)));
+}
+
+/// [`font_data`] with this module's decoder, if it has one.
+pub(crate) fn linked_font_data(data: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>, String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        match FONT_DATA.with(|d| d.get()) {
+            Some(decode) => decode(data),
+            None => Err(String::from(
+                "this web runtime has no font decoder (it was linked for an app that registers \
+                 no font)",
+            )),
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    font_data(data)
+}
+
 /// The sizes a WOFF file's table directory declares, summed (`None` for a
 /// directory cut short, which `wuff` rejects): after the 44-byte header,
 /// 20 bytes a table, its `compLength` at 8 and `origLength` at 12. A table

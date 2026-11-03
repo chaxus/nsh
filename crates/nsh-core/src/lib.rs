@@ -118,3 +118,5 @@ pub use crate::{
         Decomposed, MAX_TRANSFORMS, Matrix, Transform, TransformKind, TransformOp, translation,
     },
 };
+#[cfg(target_arch = "wasm32")]
+pub use text::{FontData, set_font_data};

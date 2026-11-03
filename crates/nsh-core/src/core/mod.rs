@@ -1673,7 +1673,7 @@ impl<M: TextEngine> Core<M> {
     /// the text engine. Text measured before is measured again.
     pub fn register_font(&mut self, data: &[u8]) -> Result<(), String> {
         self.text_engine
-            .register_font(&crate::text::font_data(data)?)?;
+            .register_font(&crate::text::linked_font_data(data)?)?;
         self.fonts_changed();
         Ok(())
     }

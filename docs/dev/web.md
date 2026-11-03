@@ -191,6 +191,8 @@ Measured with `nsh package --target web` (2026-10-28, MB of 10^6 bytes, gzip -9)
 On 2026-11-03 `examples/counter` measured 5.62 MB: the transitions' cross-fade had linked naga into every runtime
 (#682) and the core part held every control. With the cross-fade compiled through the shader gate it is 4.82 MB,
 and with the controls split into parts 3.51 MB; an app with a `Button` and toasts (the core and toast parts) 3.59 MB.
+With font decoding behind its gate counter is 3.23 MB, the `Button` and toasts app 3.31 MB, and an app that imports
+a font 3.51 MB.
 
 Shaders are a gate too (`nsh_feature_shader`, `src/shader.rs`): it sets the core's compiler of shader sources
 (`nsh_core::shader::set_compile`, naga's WGSL front end) and the translation to GLSL ES, about 0.9 MB of naga. The
@@ -199,6 +201,12 @@ counts a string `shader` anywhere in the bundle as a shader view (`NativeUse::sh
 by itself: the cross-fade a transition without a program falls back to compiles through the gate too
 (`shader::fallback_crossfade`, absent without it, when the runtime draws no shader layer anyway); calling
 `Shader::compile` or `shader::crossfade` from the core would put naga in every app's runtime.
+
+Fonts are a gate as well (`nsh_feature_fonts`, `src/text.rs`): it sets the core's decoder of font files
+(`nsh_core::set_font_data`, `font_data`: `wuff`'s WOFF and WOFF2 decompressors with Brotli and its dictionary) and
+the reader of a face's family, weight and style (`ttf-parser`), about 0.28 MB. Apps register fonts only from their
+assets (`font("asset:/…")`, as the bundler writes font imports), so the CLI keeps the gate when the build has a font
+asset; `Core::register_font` fails without it.
 
 Apps with Rust components of their own get a runtime built for them, with every part.
 The QuickJS measurements below are historical (the web ran QuickJS in WebAssembly until 2026-10) and do not

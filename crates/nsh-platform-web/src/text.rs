@@ -1035,22 +1035,59 @@ impl TextEngine for WebTextEngine {
     }
 
     fn register_font(&self, data: &[u8]) -> Result<(), String> {
-        let face = ttf_parser::Face::parse(data, 0).map_err(|e| e.to_string())?;
-        let name = |id| {
-            face.names()
-                .into_iter()
-                .filter(|n| n.name_id == id && n.is_unicode())
-                .find_map(|n| n.to_string())
-        };
-        let family = name(ttf_parser::name_id::TYPOGRAPHIC_FAMILY)
-            .or_else(|| name(ttf_parser::name_id::FAMILY))
-            .ok_or("the font has no family name")?;
-        ffi::register_font(&family, data, face.weight().to_number(), face.is_italic());
+        let face_info = FACE.with(|f| f.get()).ok_or(
+            "this web runtime has no font reader (it was linked for an app that registers no font)",
+        )?;
+        let face = face_info(data)?;
+        ffi::register_font(&face.family, data, face.weight, face.italic);
         // Widths measured with a fallback font are stale now (and again
         // when the face finishes loading: `nsh_fonts_loaded`).
         self.clear_caches();
         Ok(())
     }
+}
+
+/// What `FontFace` needs to know of a font: its family, weight and style.
+struct FaceInfo {
+    family: String,
+    weight: u16,
+    italic: bool,
+}
+
+/// What reads a font's [`FaceInfo`] ([`face_info`]).
+type FaceReader = fn(&[u8]) -> Result<FaceInfo, String>;
+
+thread_local! {
+    /// [`face_info`], once the page asked for fonts (`nsh_feature_fonts`):
+    /// a runtime linked for an app that registers no font leaves the font
+    /// parser and WOFF's decompressors out.
+    static FACE: std::cell::Cell<Option<FaceReader>> = const { std::cell::Cell::new(None) };
+}
+
+/// Links fonts: the core's WOFF decoder and the reader of a face's names.
+/// The page calls it, as every gate the module exports.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn nsh_feature_fonts() {
+    nsh_core::set_font_data(nsh_core::font_data);
+    FACE.with(|f| f.set(Some(face_info)));
+}
+
+fn face_info(data: &[u8]) -> Result<FaceInfo, String> {
+    let face = ttf_parser::Face::parse(data, 0).map_err(|e| e.to_string())?;
+    let name = |id| {
+        face.names()
+            .into_iter()
+            .filter(|n| n.name_id == id && n.is_unicode())
+            .find_map(|n| n.to_string())
+    };
+    let family = name(ttf_parser::name_id::TYPOGRAPHIC_FAMILY)
+        .or_else(|| name(ttf_parser::name_id::FAMILY))
+        .ok_or("the font has no family name")?;
+    Ok(FaceInfo {
+        family,
+        weight: face.weight().to_number(),
+        italic: face.is_italic(),
+    })
 }
 
 /// Canvas drawings use the same font and numeric-variant measurements as text.
