@@ -283,7 +283,8 @@ pub mod parts {
     /// What a part does: registers its components, classes and modules.
     pub type Part = fn(&mut Registry);
 
-    /// Every part by its name, the order [`crate::registry`] registers them.
+    /// Every part by its name, the order [`crate::registry`] registers them:
+    /// the controls ([`CONTROLS`]) first, up to `text_view`.
     pub const ALL: &[(&str, Part)] = &[
         ("core", core),
         ("link", link),
@@ -792,6 +793,28 @@ mod tests {
             ["NavStack", "NavPage", "Dialog", "createNavStack", "Input"]
         );
         assert!(bare.specs().is_empty());
+    }
+
+    /// `CONTROLS` is `ALL` up to `text_view`, in its order: a control split
+    /// into a part of its own reaches the lite web runtime only through it.
+    #[test]
+    fn the_controls_lead_the_parts() {
+        let parts = super::parts::ALL;
+        let end = parts
+            .iter()
+            .position(|(name, _)| *name == "text_view")
+            .expect("a text_view part");
+        assert_eq!(
+            super::parts::CONTROLS.len(),
+            end,
+            "CONTROLS is ALL[..text_view]"
+        );
+        for ((name, part), control) in parts.iter().zip(super::parts::CONTROLS) {
+            assert!(
+                std::ptr::fn_addr_eq(*part, *control),
+                "CONTROLS differs from ALL at `{name}`"
+            );
+        }
     }
 
     /// Every export TS sees has a doc comment (the declarations show it).
