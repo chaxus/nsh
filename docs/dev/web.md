@@ -164,8 +164,8 @@ build to the same file) and takes `nsh.js` from the crate.
 A published app's runtime holds only what the app uses: `nsh package --target web` links it from
 `nsh-browser.wasm` without a Rust toolchain or a linker. What is optional is reached only through an exported
 gate, a function that registers it: one per part of `nsh/base` (`nsh_part_core`, `nsh_part_toast`,
-`nsh_part_editor`, ..., `base_parts!` in `src/lib.rs`; `nsh_base::parts`: the core part has the controls every
-app has, buttons, links, checkboxes, tabs, toolbars, scroll bars, system alerts, and every other control or family
+`nsh_part_editor`, ..., `base_parts!` in `src/lib.rs`; `nsh_base::parts`: the core part has what every app has,
+buttons, scroll bars (scroll views' built-in bars are `Scrollbar`s) and system alerts, and every other control or family
 of them, toasts, selects, menus, calendars, carousels, ..., is a part of its own) and one per standard module
 whose operations are Rust (`nsh_std_zlib`, `nsh_std_crypto`: its hashes, the global `crypto` being the
 browser's; `nsh_std_url`: `domainToASCII` / `domainToUnicode` with IDNA's tables,

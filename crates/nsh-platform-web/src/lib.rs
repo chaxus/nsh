@@ -151,6 +151,15 @@ macro_rules! base_parts {
 
 base_parts!(
     core => nsh_part_core,
+    link => nsh_part_link,
+    checkbox => nsh_part_checkbox,
+    collapsible => nsh_part_collapsible,
+    radio => nsh_part_radio,
+    switch => nsh_part_switch,
+    progress => nsh_part_progress,
+    tabs => nsh_part_tabs,
+    toggle => nsh_part_toggle,
+    toolbar => nsh_part_toolbar,
     accordion => nsh_part_accordion,
     avatar => nsh_part_avatar,
     menu => nsh_part_menu,

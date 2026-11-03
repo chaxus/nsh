@@ -286,6 +286,15 @@ pub mod parts {
     /// Every part by its name, the order [`crate::registry`] registers them.
     pub const ALL: &[(&str, Part)] = &[
         ("core", core),
+        ("link", link),
+        ("checkbox", checkbox),
+        ("collapsible", collapsible),
+        ("radio", radio),
+        ("switch", switch),
+        ("progress", progress),
+        ("tabs", tabs),
+        ("toggle", toggle),
+        ("toolbar", toolbar),
         ("accordion", accordion),
         ("avatar", avatar),
         ("menu", menu),
@@ -327,6 +336,15 @@ pub mod parts {
     /// a runtime that serves every control (the lite web runtime).
     pub const CONTROLS: &[Part] = &[
         core,
+        link,
+        checkbox,
+        collapsible,
+        radio,
+        switch,
+        progress,
+        tabs,
+        toggle,
+        toolbar,
         accordion,
         avatar,
         menu,
@@ -350,31 +368,65 @@ pub mod parts {
         toast,
     ];
 
-    /// The controls every app has: buttons, links, checkboxes, radios,
-    /// switches, progress, tabs, toggles, toolbars, collapsibles, scroll
-    /// bars and system alerts. The other controls are parts of their own,
-    /// so a web runtime links the code of those its app uses only.
+    /// What every app has: buttons, scroll bars (scroll views' built-in
+    /// bars are `Scrollbar`s) and system alerts. Every other control is a
+    /// part of its own, so a web runtime links the code of those its app
+    /// uses only.
     pub fn core(registry: &mut Registry) {
         registry
             .register::<Button>()
-            .register::<Link>()
-            .register::<Checkbox>()
-            .register::<Collapsible>()
-            .register::<Radio>()
-            .register::<RadioGroup>()
             .register::<Scrollbar>()
             .module::<Scrollbar>()
             .scrollbars_from(crate::scrollbar::built_in)
-            .register::<Switch>()
-            .register::<Progress>()
-            .register::<Tab>()
-            .register::<Tabs>()
-            .register::<Toggle>()
-            .register::<ToggleGroup>()
+            .module::<AlertDialog>();
+    }
+
+    /// `Link`.
+    pub fn link(registry: &mut Registry) {
+        registry.register::<Link>();
+    }
+
+    /// `Checkbox`.
+    pub fn checkbox(registry: &mut Registry) {
+        registry.register::<Checkbox>();
+    }
+
+    /// `Collapsible`.
+    pub fn collapsible(registry: &mut Registry) {
+        registry.register::<Collapsible>();
+    }
+
+    /// `Radio` and `RadioGroup`.
+    pub fn radio(registry: &mut Registry) {
+        registry.register::<Radio>().register::<RadioGroup>();
+    }
+
+    /// `Switch`.
+    pub fn switch(registry: &mut Registry) {
+        registry.register::<Switch>();
+    }
+
+    /// `Progress`.
+    pub fn progress(registry: &mut Registry) {
+        registry.register::<Progress>();
+    }
+
+    /// `Tab` and `Tabs`.
+    pub fn tabs(registry: &mut Registry) {
+        registry.register::<Tab>().register::<Tabs>();
+    }
+
+    /// `Toggle` and `ToggleGroup`.
+    pub fn toggle(registry: &mut Registry) {
+        registry.register::<Toggle>().register::<ToggleGroup>();
+    }
+
+    /// `Toolbar`, `ToolbarGroup` and `ToolbarSeparator`.
+    pub fn toolbar(registry: &mut Registry) {
+        registry
             .register::<Toolbar>()
             .register::<ToolbarGroup>()
-            .register::<ToolbarSeparator>()
-            .module::<AlertDialog>();
+            .register::<ToolbarSeparator>();
     }
 
     /// `Accordion` and its parts.

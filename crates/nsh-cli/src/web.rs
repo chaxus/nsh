@@ -1084,7 +1084,14 @@ mod tests {
             gates.sort();
             gates
         };
-        let core: &[&str] = &["Button", "Switch", "Tabs", "Tab", "NavStack", "AlertDialog"];
+        let core: &[&str] = &[
+            "Button",
+            "Scrollbar",
+            "NavStack",
+            "NavPage",
+            "AlertDialog",
+            "Input",
+        ];
         assert_eq!(
             gates(&[("nsh", Some(&["mount", "View"]))]),
             ["nsh_part_core"]
@@ -1100,6 +1107,10 @@ mod tests {
         assert_eq!(
             gates(&[("crypto", Some(&["createHash"])), ("url", None)]),
             ["nsh_part_core", "nsh_std_crypto", "nsh_std_url"]
+        );
+        assert_eq!(
+            gates(&[("nsh/base", Some(&["Switch", "Tabs", "Tab"]))]),
+            ["nsh_part_core", "nsh_part_switch", "nsh_part_tabs"]
         );
         assert_eq!(
             gates(&[("nsh/base", Some(&["Button", "Editor"]))]),
