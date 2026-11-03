@@ -127,6 +127,14 @@ pub(crate) fn package(
                 gates.push("nsh_feature_fonts".into());
             }
             let exports = prune::exports(&linkable)?;
+            let missing = missing_parts(&exports);
+            if !missing.is_empty() {
+                bail!(
+                    "the web runtime has no gate for the nsh/base parts {} (`base_parts!` in \
+                     nsh-platform-web lists every name of `nsh_base::parts::ALL`)",
+                    missing.join(", ")
+                );
+            }
             let keep: Vec<&str> = exports
                 .iter()
                 .map(String::as_str)
@@ -253,6 +261,23 @@ fn is_gate(name: &str) -> bool {
     ["nsh_part_", "nsh_std_", "nsh_feature_"]
         .iter()
         .any(|prefix| name.starts_with(prefix))
+}
+
+/// The parts of `nsh_base::parts::ALL` a runtime with parts' gates does not
+/// export: `base_parts!` lists them by hand, and a part missing there would
+/// leave its controls out of every app that imports them. A runtime with no
+/// part gates (the lite one) serves its controls by itself.
+fn missing_parts(exports: &[String]) -> Vec<&'static str> {
+    let part = |export: &String| export.strip_prefix("nsh_part_").map(str::to_owned);
+    let exported: Vec<String> = exports.iter().filter_map(part).collect();
+    if exported.is_empty() {
+        return Vec::new();
+    }
+    nsh_base::parts::ALL
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| !exported.iter().any(|e| e == name))
+        .collect()
 }
 
 /// The gates ([`is_gate`]) a runtime linked for an app that uses `uses` of
@@ -1075,6 +1100,23 @@ mod tests {
             uses.imports.insert(module.to_string(), imported);
         }
         uses
+    }
+
+    #[test]
+    fn a_runtime_lacking_a_part_gate_is_found() {
+        let all: Vec<String> = nsh_base::parts::ALL
+            .iter()
+            .map(|(name, _)| format!("nsh_part_{name}"))
+            .chain(["nsh_std_zlib".to_owned()])
+            .collect();
+        assert!(missing_parts(&all).is_empty());
+        let without_toast: Vec<String> = all
+            .iter()
+            .filter(|e| *e != "nsh_part_toast")
+            .cloned()
+            .collect();
+        assert_eq!(missing_parts(&without_toast), ["toast"]);
+        assert!(missing_parts(&["nsh_std_zlib".to_owned()]).is_empty());
     }
 
     #[test]
