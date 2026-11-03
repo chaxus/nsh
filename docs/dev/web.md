@@ -163,8 +163,11 @@ build to the same file) and takes `nsh.js` from the crate.
 
 A published app's runtime holds only what the app uses: `nsh package --target web` links it from
 `nsh-browser.wasm` without a Rust toolchain or a linker. What is optional is reached only through an exported
-gate, a function that registers it: one per part of `nsh/base` (`nsh_part_core`, `nsh_part_editor`, ...,
-`base_parts!` in `src/lib.rs`) and one per standard module whose operations are Rust (`nsh_std_zlib`,
+gate, a function that registers it: one per part of `nsh/base` (`nsh_part_core`, `nsh_part_toast`,
+`nsh_part_editor`, ..., `base_parts!` in `src/lib.rs`; `nsh_base::parts`: the core part has the controls every
+app has, buttons, links, checkboxes, tabs, toolbars, scroll bars, system alerts, and every other control or family
+of them, toasts, selects, menus, calendars, carousels, ..., is a part of its own) and one per standard module
+whose operations are Rust (`nsh_std_zlib`,
 `src/browser/standard.rs`). `nsh.js` calls every gate the module exports before anything starts, so a runtime
 with all of them (the website's, the development host's) serves every app.
 
@@ -184,6 +187,10 @@ Measured with `nsh package --target web` (2026-10-28, MB of 10^6 bytes, gzip -9)
 | a `Shader` view | the core, shaders | 4.34 | 1.42 |
 | `Editor`, `Plot`, `zlib` | the core, two parts, `zlib` | 7.02 | 2.32 |
 | `examples/gallery` | every part, `zlib`, shaders | 11.22 | 3.56 |
+
+On 2026-11-03 `examples/counter` measured 5.62 MB: the transitions' cross-fade had linked naga into every runtime
+(#682) and the core part held every control. With the cross-fade compiled through the shader gate it is 4.82 MB,
+and with the controls split into parts 3.51 MB; an app with a `Button` and toasts (the core and toast parts) 3.59 MB.
 
 Shaders are a gate too (`nsh_feature_shader`, `src/shader.rs`): it sets the core's compiler of shader sources
 (`nsh_core::shader::set_compile`, naga's WGSL front end) and the translation to GLSL ES, about 0.9 MB of naga. The

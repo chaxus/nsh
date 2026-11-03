@@ -151,6 +151,27 @@ macro_rules! base_parts {
 
 base_parts!(
     core => nsh_part_core,
+    accordion => nsh_part_accordion,
+    avatar => nsh_part_avatar,
+    menu => nsh_part_menu,
+    popover => nsh_part_popover,
+    hover_card => nsh_part_hover_card,
+    sheet => nsh_part_sheet,
+    tooltip => nsh_part_tooltip,
+    calendar => nsh_part_calendar,
+    date_picker => nsh_part_date_picker,
+    time_field => nsh_part_time_field,
+    carousel => nsh_part_carousel,
+    color_picker => nsh_part_color_picker,
+    select => nsh_part_select,
+    combobox => nsh_part_combobox,
+    command => nsh_part_command,
+    number_input => nsh_part_number_input,
+    otp_input => nsh_part_otp_input,
+    pagination => nsh_part_pagination,
+    slider => nsh_part_slider,
+    tree => nsh_part_tree,
+    toast => nsh_part_toast,
     text_view => nsh_part_text_view,
     editor => nsh_part_editor,
     diff => nsh_part_diff,
@@ -162,11 +183,11 @@ base_parts!(
     plot => nsh_part_plot,
 );
 
-/// `nsh/base` in the lite runtime (feature `base-full` off): its core part,
-/// so the other parts' code stays out of the module.
+/// `nsh/base` in the lite runtime (feature `base-full` off): its controls
+/// (`parts::CONTROLS`), so the other parts' code stays out of the module.
 #[cfg(not(feature = "base-full"))]
 fn base_set() -> Registry {
-    nsh_base::registry_of([nsh_base::parts::core as nsh_base::parts::Part])
+    nsh_base::registry_of(nsh_base::parts::CONTROLS.iter().copied())
 }
 
 /// Makes this module an app's web runtime that serves `$sets` (an

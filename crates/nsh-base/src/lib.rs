@@ -278,7 +278,6 @@ pub mod parts {
         Slider, Submenu, Switch, Tab, Table, TableBody, TableCaption, TableCell, TableFooter,
         TableHead, TableHeader, TableRow, Tabs, TextView, TimeField, Toast, ToastStack, Toggle,
         ToggleGroup, Toolbar, ToolbarGroup, ToolbarSeparator, Tooltip, Tree, plot, rich_editor,
-        toast,
     };
 
     /// What a part does: registers its components, classes and modules.
@@ -287,6 +286,27 @@ pub mod parts {
     /// Every part by its name, the order [`crate::registry`] registers them.
     pub const ALL: &[(&str, Part)] = &[
         ("core", core),
+        ("accordion", accordion),
+        ("avatar", avatar),
+        ("menu", menu),
+        ("popover", popover),
+        ("hover_card", hover_card),
+        ("sheet", sheet),
+        ("tooltip", tooltip),
+        ("calendar", calendar),
+        ("date_picker", date_picker),
+        ("time_field", time_field),
+        ("carousel", carousel),
+        ("color_picker", color_picker),
+        ("select", select),
+        ("combobox", combobox),
+        ("command", command),
+        ("number_input", number_input),
+        ("otp_input", otp_input),
+        ("pagination", pagination),
+        ("slider", slider),
+        ("tree", tree),
+        ("toast", toast),
         ("text_view", text_view),
         ("editor", editor),
         ("diff", diff),
@@ -298,55 +318,46 @@ pub mod parts {
         ("plot", plot),
     ];
 
-    /// The controls, popups, toasts and dialogs every app may use: buttons,
-    /// links, carousels, checkboxes, color pickers, radios, switches, toggles, toolbars, sliders, scroll bars, number inputs, one-time code inputs, paginations, selects, comboboxes, command palettes, trees, tabs, collapsibles, accordions, progress,
-    /// menus, popovers, hover cards, sheets, tooltips, toasts and system alerts.
+    /// The controls of [`core`] and of the parts split from it: what the
+    /// core part registered before each control got a part of its own, for
+    /// a runtime that serves every control (the lite web runtime).
+    pub const CONTROLS: &[Part] = &[
+        core,
+        accordion,
+        avatar,
+        menu,
+        popover,
+        hover_card,
+        sheet,
+        tooltip,
+        calendar,
+        date_picker,
+        time_field,
+        carousel,
+        color_picker,
+        select,
+        combobox,
+        command,
+        number_input,
+        otp_input,
+        pagination,
+        slider,
+        tree,
+        toast,
+    ];
+
+    /// The controls every app has: buttons, links, checkboxes, radios,
+    /// switches, progress, tabs, toggles, toolbars, collapsibles, scroll
+    /// bars and system alerts. The other controls are parts of their own,
+    /// so a web runtime links the code of those its app uses only.
     pub fn core(registry: &mut Registry) {
         registry
-            .register::<Accordion>()
-            .register::<AccordionItem>()
-            .register::<AccordionHeader>()
-            .register::<AccordionTrigger>()
-            .register::<AccordionPanel>()
-            .register::<Avatar>()
-            .register::<AvatarGroup>()
             .register::<Button>()
             .register::<Link>()
-            .register::<ContextMenu>()
-            .register::<Menu>()
-            .register::<MenuItem>()
-            .register::<MenuSeparator>()
-            .register::<Submenu>()
-            .register::<Popover>()
-            .register::<HoverCard>()
-            .register::<Sheet>()
-            .register::<Tooltip>()
-            .register::<Calendar>()
-            .register::<Carousel>()
-            .register::<CarouselContent>()
-            .register::<CarouselItem>()
-            .register::<CarouselPrevious>()
-            .register::<CarouselNext>()
-            .register::<CarouselPagination>()
-            .register::<CarouselPaginationItem>()
             .register::<Checkbox>()
             .register::<Collapsible>()
-            .register::<DatePicker>()
-            .register::<Combobox>()
-            .register::<Command>()
-            .register::<ColorPicker>()
-            .register::<ColorArea>()
-            .register::<ColorSlider>()
-            .register::<ColorField>()
-            .register::<ColorSwatch>()
-            .register::<ColorEyeDropper>()
-            .register::<Select>()
-            .register::<NumberInput>()
-            .register::<OtpInput>()
-            .register::<Pagination>()
             .register::<Radio>()
             .register::<RadioGroup>()
-            .register::<Slider>()
             .register::<Scrollbar>()
             .module::<Scrollbar>()
             .scrollbars_from(crate::scrollbar::built_in)
@@ -359,12 +370,138 @@ pub mod parts {
             .register::<Toolbar>()
             .register::<ToolbarGroup>()
             .register::<ToolbarSeparator>()
-            .register::<TimeField>()
-            .register::<Tree>()
+            .module::<AlertDialog>();
+    }
+
+    /// `Accordion` and its parts.
+    pub fn accordion(registry: &mut Registry) {
+        registry
+            .register::<Accordion>()
+            .register::<AccordionItem>()
+            .register::<AccordionHeader>()
+            .register::<AccordionTrigger>()
+            .register::<AccordionPanel>();
+    }
+
+    /// `Avatar` and `AvatarGroup`.
+    pub fn avatar(registry: &mut Registry) {
+        registry.register::<Avatar>().register::<AvatarGroup>();
+    }
+
+    /// Menus: `Menu`, `ContextMenu` and their items.
+    pub fn menu(registry: &mut Registry) {
+        registry
+            .register::<ContextMenu>()
+            .register::<Menu>()
+            .register::<MenuItem>()
+            .register::<MenuSeparator>()
+            .register::<Submenu>();
+    }
+
+    /// `Popover`.
+    pub fn popover(registry: &mut Registry) {
+        registry.register::<Popover>();
+    }
+
+    /// `HoverCard`.
+    pub fn hover_card(registry: &mut Registry) {
+        registry.register::<HoverCard>();
+    }
+
+    /// `Sheet`.
+    pub fn sheet(registry: &mut Registry) {
+        registry.register::<Sheet>();
+    }
+
+    /// `Tooltip`.
+    pub fn tooltip(registry: &mut Registry) {
+        registry.register::<Tooltip>();
+    }
+
+    /// `Calendar`.
+    pub fn calendar(registry: &mut Registry) {
+        registry.register::<Calendar>();
+    }
+
+    /// `DatePicker`.
+    pub fn date_picker(registry: &mut Registry) {
+        registry.register::<DatePicker>();
+    }
+
+    /// `TimeField`.
+    pub fn time_field(registry: &mut Registry) {
+        registry.register::<TimeField>();
+    }
+
+    /// `Carousel` and its parts.
+    pub fn carousel(registry: &mut Registry) {
+        registry
+            .register::<Carousel>()
+            .register::<CarouselContent>()
+            .register::<CarouselItem>()
+            .register::<CarouselPrevious>()
+            .register::<CarouselNext>()
+            .register::<CarouselPagination>()
+            .register::<CarouselPaginationItem>();
+    }
+
+    /// `ColorPicker` and its parts.
+    pub fn color_picker(registry: &mut Registry) {
+        registry
+            .register::<ColorPicker>()
+            .register::<ColorArea>()
+            .register::<ColorSlider>()
+            .register::<ColorField>()
+            .register::<ColorSwatch>()
+            .register::<ColorEyeDropper>();
+    }
+
+    /// `Select`.
+    pub fn select(registry: &mut Registry) {
+        registry.register::<Select>();
+    }
+
+    /// `Combobox`.
+    pub fn combobox(registry: &mut Registry) {
+        registry.register::<Combobox>();
+    }
+
+    /// `Command`: a command palette.
+    pub fn command(registry: &mut Registry) {
+        registry.register::<Command>();
+    }
+
+    /// `NumberInput`.
+    pub fn number_input(registry: &mut Registry) {
+        registry.register::<NumberInput>();
+    }
+
+    /// `OtpInput`.
+    pub fn otp_input(registry: &mut Registry) {
+        registry.register::<OtpInput>();
+    }
+
+    /// `Pagination`.
+    pub fn pagination(registry: &mut Registry) {
+        registry.register::<Pagination>();
+    }
+
+    /// `Slider`.
+    pub fn slider(registry: &mut Registry) {
+        registry.register::<Slider>();
+    }
+
+    /// `Tree`.
+    pub fn tree(registry: &mut Registry) {
+        registry.register::<Tree>();
+    }
+
+    /// Toasts: `Toast`, `ToastStack` and `ToastManager`.
+    pub fn toast(registry: &mut Registry) {
+        registry
             .register::<Toast>()
             .register::<ToastStack>()
-            .class::<toast::ToastManagerClass>()
-            .module::<AlertDialog>();
+            .class::<crate::toast::ToastManagerClass>();
     }
 
     /// `TextView`: Markdown and HTML documents.
