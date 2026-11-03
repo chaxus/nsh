@@ -23,6 +23,8 @@ use std::{rc::Rc, sync::Arc};
 use slab::Slab;
 use taffy::{AvailableSpace, NodeId as LayoutId, Overflow, Position};
 
+#[cfg(target_arch = "wasm32")]
+pub use self::layout_tree::link_grid;
 pub use self::measure::Measurement;
 use self::{
     layout_tree::LayoutTree,

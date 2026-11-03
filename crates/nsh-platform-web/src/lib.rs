@@ -1588,6 +1588,14 @@ pub extern "C" fn nsh_resize(width: f32, height: f32) -> f64 {
     })
 }
 
+/// Links grid layout (Taffy's grid algorithm, `nsh_core::link_grid`); a
+/// runtime without it lays grid containers out as flex. The page calls it,
+/// as every gate the module exports.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn nsh_feature_grid() {
+    nsh_core::link_grid();
+}
+
 /// Fonts registered with `register_font` finished loading (`FontFace`
 /// loads asynchronously): text measured with a fallback font before is
 /// measured again.

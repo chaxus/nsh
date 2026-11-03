@@ -1056,7 +1056,7 @@ class Player {
     // before any of the app's code runs.
     glue?.__nsh_finalize(instance, module);
     // The parts of `nsh/base`, the standard modules and the features
-    // (shaders) this runtime has:
+    // (shaders, fonts, grid layout) this runtime has:
     // one linked for an app (`nsh package`) exports only those it uses.
     for (const name of Object.keys(instance.exports)) {
       if (/^nsh_(part|std|feature)_/.test(name)) instance.exports[name]();

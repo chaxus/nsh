@@ -75,6 +75,10 @@ pub struct NativeUse {
     /// template, as the compiled `<Shader>` tags do (they pass it to
     /// `nsh:rt`'s `element`, and the import of `Shader` is gone).
     pub shader: bool,
+    /// It may lay out a grid: a string or a template holds the word `grid`
+    /// or `inline-grid` (a `display` value, a Tailwind class, with or
+    /// without variants or `!` before or after).
+    pub grid: bool,
 }
 
 impl NativeUse {
@@ -107,10 +111,19 @@ struct Finder<'u, F> {
 }
 
 impl<F> Finder<'_, F> {
-    /// A string in the code: the tag of a shader view, if it is `shader`.
+    /// A string in the code: the tag of a shader view, if it is `shader`;
+    /// a grid's `display` or class, if one of its words is `grid`.
     fn quoted(&mut self, value: &str) {
         if value == "shader" {
             self.uses.shader = true;
+        }
+        if !self.uses.grid && value.contains("grid") {
+            self.uses.grid = value.split_whitespace().any(|word| {
+                let utility = word.rsplit(':').next().unwrap_or(word);
+                let utility = utility.strip_prefix('!').unwrap_or(utility);
+                let utility = utility.strip_suffix('!').unwrap_or(utility);
+                matches!(utility, "grid" | "inline-grid")
+            });
         }
     }
 
@@ -315,6 +328,22 @@ mod tests {
         assert!(uses("_$element(\"shader\");").shader);
         assert!(uses("u(`shader`);").shader);
         assert!(!uses("const shader = view;").shader);
+    }
+
+    #[test]
+    fn a_grid_display_or_class_counts_as_a_grid() {
+        for code in [
+            r#"s({ display: "grid" });"#,
+            r#"c("p-2 grid grid-cols-2");"#,
+            "c(`md:grid ${x}`);",
+            r#"c("!inline-grid");"#,
+            r#"c("grid! grid-cols-2");"#,
+        ] {
+            assert!(uses(code).grid, "{code}");
+        }
+        for code in [r#"c("grid-cols-2 flex");"#, "const grid = 1;"] {
+            assert!(!uses(code).grid, "{code}");
+        }
     }
 
     #[test]

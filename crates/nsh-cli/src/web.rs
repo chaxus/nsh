@@ -259,7 +259,8 @@ fn is_gate(name: &str) -> bool {
 /// the native modules keeps: `nsh/base`'s core, the part of each other
 /// name it imports from `nsh/base` (`nsh/base/plot` is the plot part's),
 /// `zlib`'s operations when it imports `zlib`, and shaders when it may
-/// make a shader view (`NativeUse::shader`, or an import of `Shader`). What the bundler cannot
+/// make a shader view (`NativeUse::shader`, or an import of `Shader`), and grid layout when it
+/// may lay out a grid (`NativeUse::grid`, or a part of `nsh_base::parts::GRIDS`). What the bundler cannot
 /// tell apart (no analysis, `import * as`, an `import()` of a computed
 /// specifier) keeps everything, so a runtime never lacks what an app needs.
 pub(crate) fn linked_gates(uses: Option<&nsh_bundler::NativeUse>) -> Vec<String> {
@@ -270,6 +271,7 @@ pub(crate) fn linked_gates(uses: Option<&nsh_bundler::NativeUse>) -> Vec<String>
             .collect();
         gates.push("nsh_std_zlib".into());
         gates.push("nsh_feature_shader".into());
+        gates.push("nsh_feature_grid".into());
         gates
     };
     let Some(uses) = uses else { return all() };
@@ -310,6 +312,12 @@ pub(crate) fn linked_gates(uses: Option<&nsh_bundler::NativeUse>) -> Vec<String>
             },
             _ => {}
         }
+    }
+    let grid_part = nsh_base::parts::GRIDS
+        .iter()
+        .any(|part| gates.contains(&format!("nsh_part_{part}")));
+    if uses.grid || grid_part {
+        gates.push("nsh_feature_grid".into());
     }
     gates
 }
@@ -1094,7 +1102,12 @@ mod tests {
                 ("nsh/base", Some(&["TextView"])),
                 ("zlib", Some(&["gzipSync"]))
             ]),
-            ["nsh_part_core", "nsh_part_text_view", "nsh_std_zlib"]
+            [
+                "nsh_feature_grid",
+                "nsh_part_core",
+                "nsh_part_text_view",
+                "nsh_std_zlib"
+            ]
         );
         assert_eq!(
             gates(&[("nsh/base/plot", Some(&["Plot"]))]),
@@ -1104,7 +1117,17 @@ mod tests {
             gates(&[("nsh", Some(&["mount", "Shader"]))]),
             ["nsh_feature_shader", "nsh_part_core"]
         );
-        let every = nsh_base::parts::ALL.len() + 2;
+        assert_eq!(
+            gates(&[("nsh/base", Some(&["DockArea"]))]),
+            ["nsh_feature_grid", "nsh_part_core", "nsh_part_dock"]
+        );
+        let mut grid = uses(&[("nsh", Some(&["mount"]))]);
+        grid.grid = true;
+        assert_eq!(
+            linked_gates(Some(&grid)),
+            ["nsh_part_core", "nsh_feature_grid"]
+        );
+        let every = nsh_base::parts::ALL.len() + 3;
         assert_eq!(gates(&[("nsh/base", None)]).len(), every);
         let mut computed = uses(&[]);
         computed.computed_import = true;

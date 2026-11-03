@@ -192,7 +192,7 @@ On 2026-11-03 `examples/counter` measured 5.62 MB: the transitions' cross-fade h
 (#682) and the core part held every control. With the cross-fade compiled through the shader gate it is 4.82 MB,
 and with the controls split into parts 3.51 MB; an app with a `Button` and toasts (the core and toast parts) 3.59 MB.
 With font decoding behind its gate counter is 3.23 MB, the `Button` and toasts app 3.31 MB, and an app that imports
-a font 3.51 MB.
+a font 3.51 MB. With grid layout behind its gate counter is 3.08 MB, and an app that lays out grids 3.23 MB.
 
 Shaders are a gate too (`nsh_feature_shader`, `src/shader.rs`): it sets the core's compiler of shader sources
 (`nsh_core::shader::set_compile`, naga's WGSL front end) and the translation to GLSL ES, about 0.9 MB of naga. The
@@ -207,6 +207,17 @@ Fonts are a gate as well (`nsh_feature_fonts`, `src/text.rs`): it sets the core'
 the reader of a face's family, weight and style (`ttf-parser`), about 0.28 MB. Apps register fonts only from their
 assets (`font("asset:/…")`, as the bundler writes font imports), so the CLI keeps the gate when the build has a font
 asset; `Core::register_font` fails without it.
+
+Grid layout is a gate too (`nsh_feature_grid`, `src/lib.rs`): it links Taffy's grid algorithm (`nsh_core::link_grid`,
+about 0.14 MB). The core's layout tree is generic over the leaves' context and measure, so on WebAssembly a grid
+container is laid out through `GridView`, the tree behind an object-safe trait (`core/layout_tree.rs`): one instance
+of the algorithm, reached only from the gate, where an instance over the tree itself would be reachable from every
+layout; the native backends call it directly. The bundler counts a word `grid` or `inline-grid` in any string or
+template (a `display` value, a Tailwind class with its variants) as a grid (`NativeUse::grid`), and the parts whose
+components lay out grids keep it (`nsh_base::parts::GRIDS`: `TextView`'s tables, `RichEditor`'s, `DockArea`'s tab
+groups). A runtime without the gate lays a grid container out as flex and warns once: a `display` or class that
+reaches the app only at run time (a style it fetches) is not in the bundle, so such an app spells `grid` in its
+code to keep the gate.
 
 Apps with Rust components of their own get a runtime built for them, with every part.
 The QuickJS measurements below are historical (the web ran QuickJS in WebAssembly until 2026-10) and do not

@@ -180,6 +180,11 @@ nsh package App.tsx --target web --run
 | `Editor`、`Plot` 和 `zlib` | 基础组件、`nsh/base` 的另外两部分和 `zlib` | 7.02 MB | 2.32 MB |
 | `examples/gallery` | 全部组件、`zlib` 和着色器 | 11.22 MB | 3.56 MB |
 
+字体和 grid 布局也按打包进来的代码链接：应用有字体资源时链接字体解码；代码里写了 `display: "grid"` 或 `"inline-grid"`、
+`grid` 或 `inline-grid` class（带任意变体），或者用到会做 grid 布局的组件（`TextView`、`RichEditor`、`DockArea`）时链接
+grid 布局。如果应用的 grid 只来自运行时才拿到的样式，就在代码里写上其中一种，例如给某个视图加 `class="grid"`，运行时就会保留
+grid 布局；没有 grid 布局的运行时会把 grid 容器按 flex 容器布局，并打印一条警告。
+
 ### 部署
 
 把目录上传到任意静态托管：CDN 后面的对象存储、Cloudflare Pages、Netlify、GitHub Pages、nginx。遵循两条规则，加载就快，更新也可靠：

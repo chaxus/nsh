@@ -119,4 +119,6 @@ pub use crate::{
     },
 };
 #[cfg(target_arch = "wasm32")]
+pub use crate::core::link_grid;
+#[cfg(target_arch = "wasm32")]
 pub use text::{FontData, set_font_data};

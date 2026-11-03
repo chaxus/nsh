@@ -318,6 +318,10 @@ pub mod parts {
         ("plot", plot),
     ];
 
+    /// The parts whose components lay out grids (`display: grid`): a web
+    /// runtime linked for an app with one of them links grid layout too.
+    pub const GRIDS: &[&str] = &["text_view", "rich_editor", "dock"];
+
     /// The controls of [`core`] and of the parts split from it: what the
     /// core part registered before each control got a part of its own, for
     /// a runtime that serves every control (the lite web runtime).

@@ -496,7 +496,7 @@ where
                 (Display::Block, true) => compute_block_layout(view, node, inputs, block),
                 (Display::FlowRoot, true) => compute_block_layout(view, node, inputs, None),
                 (Display::Flex, true) => compute_flexbox_layout(view, node, inputs),
-                (Display::Grid, true) => compute_grid_layout(view, node, inputs),
+                (Display::Grid, true) => grid_layout(view, node, inputs),
                 (_, false) => {
                     let n = &mut view.tree.nodes[key(node)];
                     let output = (view.measure)(inputs, node, n.context.as_mut(), &n.style);
@@ -737,5 +737,208 @@ where
 
     fn set_detailed_grid_info(&mut self, node: NodeId, info: DetailedGridInfo) {
         self.tree.nodes[key(node)].detailed = DetailedLayoutInfo::Grid(Box::new(info));
+    }
+}
+
+/// Lays a grid container out: with Taffy's grid algorithm where it is
+/// linked, as a flex container otherwise (and a warning, once).
+#[cfg(not(target_arch = "wasm32"))]
+fn grid_layout<C, M>(view: &mut View<'_, C, M>, node: NodeId, inputs: LayoutInput) -> LayoutOutput
+where
+    M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style) -> LayoutOutput,
+{
+    compute_grid_layout(view, node, inputs)
+}
+
+/// Lays a grid container out: with Taffy's grid algorithm where it is
+/// linked, as a flex container otherwise (and a warning, once).
+///
+/// A web runtime links the algorithm only through its gate for grids
+/// ([`link_grid`]), over a tree of no type parameters ([`GridView`]): an
+/// instance over `View` itself would be reachable from every layout.
+#[cfg(target_arch = "wasm32")]
+fn grid_layout<C, M>(view: &mut View<'_, C, M>, node: NodeId, inputs: LayoutInput) -> LayoutOutput
+where
+    M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style) -> LayoutOutput,
+{
+    match GRID.with(|g| g.get()) {
+        Some(grid) => grid(&mut GridView(view), node, inputs),
+        None => {
+            if !GRID_WARNED.with(|w| w.replace(true)) {
+                log::warn!(
+                    "`display: grid` is laid out as flex: this web runtime was linked for an app \
+                     that lays out no grid"
+                );
+            }
+            compute_flexbox_layout(view, node, inputs)
+        }
+    }
+}
+
+/// What Taffy's grid algorithm lays out ([`GridView`]).
+#[cfg(target_arch = "wasm32")]
+type Grid = for<'a, 'v> fn(&'a mut GridView<'v>, NodeId, LayoutInput) -> LayoutOutput;
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    /// The grid algorithm, once the web runtime's gate for grids linked it.
+    static GRID: std::cell::Cell<Option<Grid>> = const { std::cell::Cell::new(None) };
+    /// Whether a grid was laid out as flex already.
+    static GRID_WARNED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Links Taffy's grid algorithm into this WebAssembly module: the web
+/// runtime's gate for grids calls it, so the algorithm is linked only into
+/// the runtimes of apps that lay out grids. The native backends always
+/// have it.
+#[cfg(target_arch = "wasm32")]
+pub fn link_grid() {
+    fn grid(view: &mut GridView<'_>, node: NodeId, inputs: LayoutInput) -> LayoutOutput {
+        compute_grid_layout(view, node, inputs)
+    }
+    GRID.with(|g| g.set(Some(grid)));
+}
+
+/// What the grid algorithm asks of the tree, of no type parameters
+/// ([`GridView`]).
+#[cfg(target_arch = "wasm32")]
+trait GridTree {
+    fn style(&self, node: NodeId) -> &Style;
+    fn child_count(&self, parent: NodeId) -> usize;
+    fn child_id(&self, parent: NodeId, index: usize) -> NodeId;
+    fn set_unrounded_layout(&mut self, node: NodeId, layout: &Layout);
+    fn compute_child_layout(&mut self, node: NodeId, inputs: LayoutInput) -> LayoutOutput;
+    fn set_detailed_grid_info(&mut self, node: NodeId, info: DetailedGridInfo);
+}
+
+#[cfg(target_arch = "wasm32")]
+impl<C, M> GridTree for View<'_, C, M>
+where
+    M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style) -> LayoutOutput,
+{
+    fn style(&self, node: NodeId) -> &Style {
+        &self.node(node).style
+    }
+
+    fn child_count(&self, parent: NodeId) -> usize {
+        TraversePartialTree::child_count(self, parent)
+    }
+
+    fn child_id(&self, parent: NodeId, index: usize) -> NodeId {
+        self.get_child_id(parent, index)
+    }
+
+    fn set_unrounded_layout(&mut self, node: NodeId, layout: &Layout) {
+        LayoutPartialTree::set_unrounded_layout(self, node, layout);
+    }
+
+    fn compute_child_layout(&mut self, node: NodeId, inputs: LayoutInput) -> LayoutOutput {
+        View::compute_child_layout(self, node, inputs, None)
+    }
+
+    fn set_detailed_grid_info(&mut self, node: NodeId, info: DetailedGridInfo) {
+        LayoutGridContainer::set_detailed_grid_info(self, node, info);
+    }
+}
+
+/// The tree being laid out, behind [`GridTree`]: one instance of the grid
+/// algorithm serves every `View`.
+#[cfg(target_arch = "wasm32")]
+struct GridView<'v>(&'v mut dyn GridTree);
+
+/// A grid container's children ([`GridView`]).
+#[cfg(target_arch = "wasm32")]
+struct GridChildren<'a> {
+    tree: &'a dyn GridTree,
+    parent: NodeId,
+    indices: std::ops::Range<usize>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Iterator for GridChildren<'_> {
+    type Item = NodeId;
+
+    fn next(&mut self) -> Option<NodeId> {
+        self.indices
+            .next()
+            .map(|i| self.tree.child_id(self.parent, i))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.indices.size_hint()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl TraversePartialTree for GridView<'_> {
+    type ChildIter<'a>
+        = GridChildren<'a>
+    where
+        Self: 'a;
+
+    fn child_ids(&self, parent: NodeId) -> Self::ChildIter<'_> {
+        GridChildren {
+            tree: &*self.0,
+            parent,
+            indices: 0..self.0.child_count(parent),
+        }
+    }
+
+    fn child_count(&self, parent: NodeId) -> usize {
+        self.0.child_count(parent)
+    }
+
+    fn get_child_id(&self, parent: NodeId, index: usize) -> NodeId {
+        self.0.child_id(parent, index)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl LayoutPartialTree for GridView<'_> {
+    type CoreContainerStyle<'a>
+        = &'a Style
+    where
+        Self: 'a;
+
+    type CustomIdent = String;
+
+    fn get_core_container_style(&self, node: NodeId) -> Self::CoreContainerStyle<'_> {
+        self.0.style(node)
+    }
+
+    fn set_unrounded_layout(&mut self, node: NodeId, layout: &Layout) {
+        self.0.set_unrounded_layout(node, layout);
+    }
+
+    fn resolve_calc_value(&self, _: *const (), _: f32) -> f32 {
+        0.0
+    }
+
+    fn compute_child_layout(&mut self, node: NodeId, inputs: LayoutInput) -> LayoutOutput {
+        self.0.compute_child_layout(node, inputs)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl LayoutGridContainer for GridView<'_> {
+    type GridContainerStyle<'a>
+        = &'a Style
+    where
+        Self: 'a;
+    type GridItemStyle<'a>
+        = &'a Style
+    where
+        Self: 'a;
+
+    fn get_grid_container_style(&self, node: NodeId) -> Self::GridContainerStyle<'_> {
+        self.0.style(node)
+    }
+
+    fn get_grid_child_style(&self, child: NodeId) -> Self::GridItemStyle<'_> {
+        self.0.style(child)
+    }
+
+    fn set_detailed_grid_info(&mut self, node: NodeId, info: DetailedGridInfo) {
+        self.0.set_detailed_grid_info(node, info);
     }
 }

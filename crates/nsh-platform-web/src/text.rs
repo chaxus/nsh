@@ -1072,6 +1072,7 @@ pub(crate) extern "C" fn nsh_feature_fonts() {
     FACE.with(|f| f.set(Some(face_info)));
 }
 
+/// The family, weight and style `data`, a TrueType or OpenType font, names.
 fn face_info(data: &[u8]) -> Result<FaceInfo, String> {
     let face = ttf_parser::Face::parse(data, 0).map_err(|e| e.to_string())?;
     let name = |id| {

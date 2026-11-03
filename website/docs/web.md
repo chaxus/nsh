@@ -175,6 +175,13 @@ level 9):
 | `Editor`, `Plot` and `zlib` | The core components, two more parts of `nsh/base` and `zlib` | 7.02 MB | 2.32 MB |
 | `examples/gallery` | Every component, `zlib` and shaders | 11.22 MB | 3.56 MB |
 
+Fonts and grid layout are linked the same way, from what the bundled code holds: font decoding when the app has a
+font asset, and grid layout when its code spells `display: "grid"` or `"inline-grid"`, a `grid` or `inline-grid`
+class (with any variants), or uses a component that lays out grids (`TextView`, `RichEditor`, `DockArea`). An app
+whose grids come only from styles it receives at run time spells one of these in its code, for example
+`class="grid"` on one of its views, so its runtime keeps grid layout; a runtime without it lays grid containers out
+as flex containers and logs a warning.
+
 ### Deploy it
 
 Upload the directory to any static host: an object store behind a CDN, Cloudflare Pages, Netlify, GitHub Pages,
