@@ -167,7 +167,8 @@ gate, a function that registers it: one per part of `nsh/base` (`nsh_part_core`,
 `nsh_part_editor`, ..., `base_parts!` in `src/lib.rs`; `nsh_base::parts`: the core part has the controls every
 app has, buttons, links, checkboxes, tabs, toolbars, scroll bars, system alerts, and every other control or family
 of them, toasts, selects, menus, calendars, carousels, ..., is a part of its own) and one per standard module
-whose operations are Rust (`nsh_std_zlib`,
+whose operations are Rust (`nsh_std_zlib`, `nsh_std_crypto`: its hashes, the global `crypto` being the
+browser's; `nsh_std_url`: `domainToASCII` / `domainToUnicode` with IDNA's tables,
 `src/browser/standard.rs`). `nsh.js` calls every gate the module exports before anything starts, so a runtime
 with all of them (the website's, the development host's) serves every app.
 

@@ -111,6 +111,39 @@ impl HashState {
 impl Standard {
     pub(super) fn call(&self, op: u32, args: &Value) -> Result<Value, PropError> {
         #[cfg(feature = "std-crypto")]
+        if matches!(op, 900 | 903..=906) {
+            let Some(crypto) = CRYPTO.with(|c| c.get()) else {
+                return Err(PropError("crypto is not linked into this runtime".into()));
+            };
+            return crypto(self, op, args);
+        }
+        let name = args.index(0)?.as_string().unwrap_or_default();
+        if op == 902 {
+            let Some(domain) = URL.with(|u| u.get()) else {
+                return Err(PropError("url is not linked into this runtime".into()));
+            };
+            let input = args.index(1)?.as_string().unwrap_or_default();
+            return Value::string(&domain(&name, &input)?);
+        }
+        #[cfg(not(feature = "std-zlib"))]
+        {
+            Err(PropError(
+                "standard operation unavailable in this runtime".into(),
+            ))
+        }
+        #[cfg(feature = "std-zlib")]
+        {
+            let Some(compress) = ZLIB.with(|z| z.get()) else {
+                return Err(PropError("zlib is not linked into this runtime".into()));
+            };
+            compress(op, &name, args)
+        }
+    }
+
+    /// `crypto`'s hashes: made (900, 906 for CRC32 / CRC32C), fed (903),
+    /// digested (904) and dropped (905).
+    #[cfg(feature = "std-crypto")]
+    fn crypto(&self, op: u32, args: &Value) -> Result<Value, PropError> {
         if matches!(op, 903..=905) {
             let id = args.index(0)?.as_number().unwrap_or(0.0) as u32;
             if op == 905 {
@@ -135,16 +168,7 @@ impl Standard {
             return Value::bytes(&hash.finish());
         }
         let name = args.index(0)?.as_string().unwrap_or_default();
-        if op == 902 {
-            let input = args.index(1)?.as_string().unwrap_or_default();
-            return Value::string(&match name.as_str() {
-                "domainToASCII" => url::quirks::domain_to_ascii(&input),
-                "domainToUnicode" => url::quirks::domain_to_unicode(&input),
-                _ => return Err(PropError("unknown URL operation".into())),
-            });
-        }
-        #[cfg(feature = "std-crypto")]
-        if matches!(op, 900 | 906) {
+        {
             #[cfg(feature = "std-crypto")]
             let key = args.index(1)?.read_bytes();
             let algorithm = name.to_ascii_uppercase().replace('-', "");
@@ -217,22 +241,48 @@ impl Standard {
                 .ok_or_else(|| PropError("hash IDs exhausted".into()))?;
             self.next.set(id);
             self.hashes.borrow_mut().insert(id, state);
-            return Ok(Value::number(id.into()));
-        }
-        #[cfg(not(feature = "std-zlib"))]
-        {
-            Err(PropError(
-                "standard operation unavailable in this runtime".into(),
-            ))
-        }
-        #[cfg(feature = "std-zlib")]
-        {
-            let Some(compress) = ZLIB.with(|z| z.get()) else {
-                return Err(PropError("zlib is not linked into this runtime".into()));
-            };
-            compress(op, &name, args)
+            Ok(Value::number(id.into()))
         }
     }
+}
+
+#[cfg(feature = "std-crypto")]
+type Crypto = fn(&Standard, u32, &Value) -> Result<Value, PropError>;
+
+thread_local! {
+    /// `crypto`'s hashes, once the page asked for them (`nsh_std_crypto`).
+    #[cfg(feature = "std-crypto")]
+    static CRYPTO: std::cell::Cell<Option<Crypto>> = const { std::cell::Cell::new(None) };
+    /// `url`'s domain conversions, once the page asked for them
+    /// (`nsh_std_url`): IDNA's mapping tables are about 0.1 MB.
+    static URL: std::cell::Cell<Option<Domain>> = const { std::cell::Cell::new(None) };
+}
+
+/// Links `crypto`'s hashes: the page calls it when the app imports
+/// `crypto`, and a runtime linked for an app that does not drops them (the
+/// global `crypto` is the browser's).
+#[cfg(feature = "std-crypto")]
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn nsh_std_crypto() {
+    CRYPTO.with(|c| c.set(Some(Standard::crypto)));
+}
+
+type Domain = fn(&str, &str) -> Result<String, PropError>;
+
+/// Links `url`'s `domainToASCII` and `domainToUnicode`: the page calls it
+/// when the app imports `url`, and a runtime linked for an app that does
+/// not drops them.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn nsh_std_url() {
+    URL.with(|u| u.set(Some(domain)));
+}
+
+fn domain(name: &str, input: &str) -> Result<String, PropError> {
+    Ok(match name {
+        "domainToASCII" => url::quirks::domain_to_ascii(input),
+        "domainToUnicode" => url::quirks::domain_to_unicode(input),
+        _ => return Err(PropError("unknown URL operation".into())),
+    })
 }
 
 #[cfg(feature = "std-zlib")]

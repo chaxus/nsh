@@ -258,7 +258,7 @@ fn is_gate(name: &str) -> bool {
 /// The gates ([`is_gate`]) a runtime linked for an app that uses `uses` of
 /// the native modules keeps: `nsh/base`'s core, the part of each other
 /// name it imports from `nsh/base` (`nsh/base/plot` is the plot part's),
-/// `zlib`'s operations when it imports `zlib`, and shaders when it may
+/// `zlib`'s, `crypto`'s and `url`'s operations when it imports them, and shaders when it may
 /// make a shader view (`NativeUse::shader`, or an import of `Shader`), and grid layout when it
 /// may lay out a grid (`NativeUse::grid`, or a part of `nsh_base::parts::GRIDS`). What the bundler cannot
 /// tell apart (no analysis, `import * as`, an `import()` of a computed
@@ -270,6 +270,8 @@ pub(crate) fn linked_gates(uses: Option<&nsh_bundler::NativeUse>) -> Vec<String>
             .map(|(name, _)| format!("nsh_part_{name}"))
             .collect();
         gates.push("nsh_std_zlib".into());
+        gates.push("nsh_std_crypto".into());
+        gates.push("nsh_std_url".into());
         gates.push("nsh_feature_shader".into());
         gates.push("nsh_feature_grid".into());
         gates
@@ -290,6 +292,9 @@ pub(crate) fn linked_gates(uses: Option<&nsh_bundler::NativeUse>) -> Vec<String>
     for (module, imported) in &uses.imports {
         match module.as_str() {
             "zlib" => add("nsh_std_zlib".into()),
+            // Its hashes; the global `crypto` is the browser's.
+            "crypto" => add("nsh_std_crypto".into()),
+            "url" => add("nsh_std_url".into()),
             // Shaders are `nsh`'s `Shader` element.
             "nsh" => match imported {
                 nsh_bundler::Imported::All => add("nsh_feature_shader".into()),
@@ -1089,9 +1094,12 @@ mod tests {
                 ("nsh", Some(&["mount"])),
                 ("nsh/base", Some(core)),
                 ("buffer", None),
-                ("crypto", Some(&["createHash"])),
             ]),
             ["nsh_part_core"]
+        );
+        assert_eq!(
+            gates(&[("crypto", Some(&["createHash"])), ("url", None)]),
+            ["nsh_part_core", "nsh_std_crypto", "nsh_std_url"]
         );
         assert_eq!(
             gates(&[("nsh/base", Some(&["Button", "Editor"]))]),
@@ -1127,7 +1135,7 @@ mod tests {
             linked_gates(Some(&grid)),
             ["nsh_part_core", "nsh_feature_grid"]
         );
-        let every = nsh_base::parts::ALL.len() + 3;
+        let every = nsh_base::parts::ALL.len() + 5;
         assert_eq!(gates(&[("nsh/base", None)]).len(), every);
         let mut computed = uses(&[]);
         computed.computed_import = true;
