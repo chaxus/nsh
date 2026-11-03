@@ -1,0 +1,95 @@
+name: Web CLI prerelease
+
+# Fork only (chaxus/nsh, branch h5-runtime: upstream main plus this file).
+# Builds the Linux CLI and the web runtime h5hub's CI needs for
+# `nsh package --target web`, in the layout of `dist/nsh`, and publishes them
+# as a prerelease whose assets match what `install.sh` downloads
+# (`nsh-linux-x86_64.tar.gz` and its `.sha256`). The full Release workflow
+# also builds the Linux, GPUI and Android runtimes on three systems.
+#
+# To follow upstream: rebase h5-runtime on upstream main and push it.
+
+on:
+  push:
+    branches: [h5-runtime]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: web-cli
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libclang-dev
+          echo "CC_wasm32_unknown_unknown=/usr/bin/clang" >> "$GITHUB_ENV"
+          echo "AR_wasm32_unknown_unknown=/usr/bin/llvm-ar" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Build the CLI and the web runtime
+        run: |
+          cargo build --release --locked -p nsh-cli
+          cargo build --locked --profile web -p nsh-platform-web \
+            --no-default-features --features browser,linkable --target wasm32-unknown-unknown
+
+      - name: Lay out dist/nsh
+        run: |
+          out=dist/nsh
+          rm -rf dist
+          mkdir -p "$out/bin" "$out/runtime/web/browser"
+          cp target/release/nsh "$out/bin/nsh"
+          cp target/wasm32-unknown-unknown/web/nsh_platform_web.wasm "$out/runtime/web/nsh-browser.wasm"
+          cp crates/nsh-platform-web/web/nsh.js "$out/runtime/web/nsh.js"
+          cp crates/nsh-platform-web/web/browser/*.js crates/nsh-platform-web/web/browser/*.txt "$out/runtime/web/browser/" 2>/dev/null || \
+            cp crates/nsh-platform-web/web/browser/*.js "$out/runtime/web/browser/"
+          two_face=$(cargo metadata --format-version 1 --locked | jq -r '.packages[] | select(.name == "two-face") | .manifest_path' | head -1)
+          cp "$(dirname "$two_face")/generated/syntaxes-fancy-newlines.bin" "$out/runtime/web/nsh-syntaxes.bin"
+          cp README.md LICENSE-APACHE "$out/"
+          find dist -type f | sort
+
+      - name: Smoke test
+        run: |
+          nsh=dist/nsh/bin/nsh
+          "$nsh" --version
+          app="$RUNNER_TEMP/smoke-app"
+          "$nsh" init "$app" --template ts
+          "$nsh" package "$app" --target web -o "$RUNNER_TEMP/smoke-web"
+          find "$RUNNER_TEMP/smoke-web" -type f | sort
+
+      - name: Publish the prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          main=$(git rev-parse --short=8 HEAD^)
+          tag="v$version-main.$(date -u +%Y%m%d).$main"
+          cd dist
+          tar -czf nsh-linux-x86_64.tar.gz nsh
+          shasum -a 256 nsh-linux-x86_64.tar.gz > nsh-linux-x86_64.tar.gz.sha256
+          gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$tag" nsh-linux-x86_64.tar.gz nsh-linux-x86_64.tar.gz.sha256 \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "nsh $tag" --notes "Linux CLI and web runtime of upstream main $main (h5-runtime)."
+          echo "### $tag" >> "$GITHUB_STEP_SUMMARY"
