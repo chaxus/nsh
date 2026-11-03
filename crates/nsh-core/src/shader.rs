@@ -353,16 +353,39 @@ impl From<bool> for TransitionKey {
 /// uniforms, the built-in `nsh.progress`.
 pub const PROGRESS_WORD: u32 = u32::MAX;
 
+/// The source of [`crossfade`].
+const CROSSFADE_SOURCE: &str = "fn shade(uv: vec2f) -> vec4f {\n    return mix(sample_from(uv), sample_to(uv), nsh.progress);\n}\n";
+
 /// The transitions' default program: a cross-fade from `sample_from` to
 /// `sample_to` over `nsh.progress`.
 pub fn crossfade() -> Shader {
     static CROSSFADE: std::sync::LazyLock<Shader> = std::sync::LazyLock::new(|| {
-        Shader::compile(
-            "fn shade(uv: vec2f) -> vec4f {\n    return mix(sample_from(uv), sample_to(uv), nsh.progress);\n}\n",
-        )
-        .expect("the cross-fade compiles")
+        Shader::compile(CROSSFADE_SOURCE).expect("the cross-fade compiles")
     });
     CROSSFADE.clone()
+}
+
+/// [`crossfade`] for a transition without a program of its own, compiled
+/// with this module's compiler ([`compile_source`]); `None` without one.
+/// The core must not call [`crossfade`]: it links naga, which on the web
+/// only the shader gate may link, and a runtime without the gate draws no
+/// shader layer anyway (`nsh-platform-web`'s `encode_layer`).
+pub(crate) fn fallback_crossfade() -> Option<Shader> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        thread_local! {
+            static FADE: std::cell::OnceCell<Shader> = const { std::cell::OnceCell::new() };
+        }
+        FADE.with(|fade| {
+            if let Some(shader) = fade.get() {
+                return Some(shader.clone());
+            }
+            let shader = compile_source(CROSSFADE_SOURCE).ok()?;
+            Some(fade.get_or_init(|| shader).clone())
+        })
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    Some(crossfade())
 }
 
 /// Why a shader did not compile: what is wrong and where in the app's

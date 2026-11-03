@@ -3314,7 +3314,8 @@ impl<M: TextEngine> Core<M> {
         // A transition without a shader of its own runs its fallback.
         let program = state.shader.clone().or_else(|| {
             (transition && state.fallback == crate::TransitionFallback::Fade)
-                .then(crate::shader::crossfade)
+                .then(crate::shader::fallback_crossfade)
+                .flatten()
         });
         let layer = program.map(|shader| {
             let mut warnings = Vec::new();

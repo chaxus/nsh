@@ -188,7 +188,10 @@ Measured with `nsh package --target web` (2026-10-28, MB of 10^6 bytes, gzip -9)
 Shaders are a gate too (`nsh_feature_shader`, `src/shader.rs`): it sets the core's compiler of shader sources
 (`nsh_core::shader::set_compile`, naga's WGSL front end) and the translation to GLSL ES, about 0.9 MB of naga. The
 compiled `<Shader>` tag leaves no import of `Shader` (it calls `nsh:rt`'s `element("shader")`), so the bundler
-counts a string `shader` anywhere in the bundle as a shader view (`NativeUse::shader`).
+counts a string `shader` anywhere in the bundle as a shader view (`NativeUse::shader`). The core never links naga
+by itself: the cross-fade a transition without a program falls back to compiles through the gate too
+(`shader::fallback_crossfade`, absent without it, when the runtime draws no shader layer anyway); calling
+`Shader::compile` or `shader::crossfade` from the core would put naga in every app's runtime.
 
 Apps with Rust components of their own get a runtime built for them, with every part.
 The QuickJS measurements below are historical (the web ran QuickJS in WebAssembly until 2026-10) and do not
