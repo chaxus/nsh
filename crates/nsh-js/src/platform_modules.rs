@@ -523,20 +523,59 @@ export interface IOSWebViewProps extends IOSProps, IOSWebViewHostProps {}
 export interface DesktopWebViewProps extends DesktopProps, DesktopWebViewHostProps {}
 "#;
 
+/// Native hosts: `Video.streamAvailable()` is false (MediaStream is web-only).
+unsafe extern "C" fn video_stream_unavailable(
+    _cx: *mut JsContext,
+    _this: JsValue,
+    _argc: c_int,
+    _argv: *mut JsValue,
+) -> JsValue {
+    qjs::JS_FALSE
+}
+
 /// `nsh`'s `Video`.
 pub(crate) const VIDEO_EXPORTS: &[Item] = &[(
     "Video",
-    Export::Value(|cx| dom::host_component(cx, "video", false)),
+    Export::Value(|cx| {
+        let video = dom::host_component(cx, "video", false);
+        // SAFETY: attach a function returning false; web overrides this in scope.js.
+        unsafe {
+            let f = qjs::JS_NewCFunction(
+                cx,
+                Some(video_stream_unavailable),
+                c"streamAvailable".as_ptr(),
+                0,
+            );
+            qjs::JS_SetPropertyStr(cx, video, c"streamAvailable".as_ptr(), f);
+        }
+        video
+    }),
     Ts::value(
-        "A video player (AVPlayer / MediaPlayer); its `ref` has `seek(seconds)`.",
-        "(props: VideoProps) => JSX.Element",
+        "A video player (AVPlayer / MediaPlayer); its `ref` has `seek(seconds)`. On the web, `stream` accepts a MediaStream (`Video.streamAvailable()`).",
+        "((props: VideoProps) => JSX.Element) & VideoModule",
     ),
 )];
 
 /// `Video`'s types.
-pub(crate) const VIDEO_TYPES: &str = r#"export interface VideoProps extends Omit<ViewProps, "children" | "ref">, VideoHostProps {
+pub(crate) const VIDEO_TYPES: &str = r#"export interface VideoModule {
+  /** Whether this runtime can play a live stream via the `stream` prop (web only today). */
+  streamAvailable(): boolean;
+}
+
+/** Minimal MediaStream shape (`DOM` MediaStream on web). */
+export type VideoStream = {
+  getTracks(): ReadonlyArray<{ stop(): void }>;
+};
+
+export interface VideoProps extends Omit<ViewProps, "children" | "ref">, VideoHostProps {
   ref?: VideoRef | ((node: VideoRef) => void);
-  src: string;
+  /** URL of a video file. Mutually exclusive with `stream`; `stream` wins when both are set. */
+  src?: string;
+  /**
+   * A live media stream (WebRTC `ontrack`, `getUserMedia`). Web only —
+   * check `Video.streamAvailable()`. Cleared with `null` / `undefined`.
+   */
+  stream?: VideoStream | null;
 }
 "#;
 

@@ -2,7 +2,8 @@
 // plays, as the platform receives it: its source, paused (then playing),
 // muted, its volume and speed, looping, the platform's controls, how it
 // fits its box (`objectFit`), how often it reports progress and what its sound does to
-// other apps' audio. Its script checks each.
+// other apps' audio. `Video.streamAvailable()` reports whether this runtime
+// can take a live MediaStream via `stream` (web only). Its script checks each.
 import { Text, View, signal } from "nsh";
 import { Video } from "nsh";
 
@@ -10,6 +11,7 @@ function App() {
   const paused = signal(true);
   return (
     <View style={{ flex: 1, paddingTop: 64 }}>
+      <Text testID="stream-api">{`streamAvailable: ${Video.streamAvailable()}`}</Text>
       <View testID="play" onPress={() => paused.set(false)}>
         <Text>Play</Text>
       </View>

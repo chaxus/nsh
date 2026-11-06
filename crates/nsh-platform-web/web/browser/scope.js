@@ -36,6 +36,10 @@ export function configureAPIs(nsh, modules, dom, active, env) {
     const Component = props => {const node = dom.rt.element(tag);dom.rt.spread(node,props);if ("children" in props) dom.rt.insert(node,()=>props.children);return node;};
     nsh[name] = Object.assign(Component, nsh[name]);
   }
+  // Web-only: MediaStream via `stream` / srcObject. Native returns false.
+  if (typeof nsh.Video === "function") {
+    nsh.Video.streamAvailable = () => true;
+  }
   nsh.nativeComponent = (name, spec = {}) => (props = {}) => {
     const node = dom.rt.element("native");
     dom.rt.prop(node, "component", name);

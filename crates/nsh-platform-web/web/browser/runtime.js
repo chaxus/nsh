@@ -165,7 +165,7 @@ export function createBrowserHost(player) {
         current.imports = values.imports(() => player.wasm.memory);
         player.wasm.nsh_browser_initialize();
         const reactive = createReactive(call, active, values);
-        const dom = createDom(call, values, reactive, active, requestPump);
+        const dom = createDom(call, values, reactive, active, requestPump, player);
         const hot = app.hot = createHot(reactive, report);
         dom.setHot(hot);
         const env = createEnvironment(reactive, call, dom);

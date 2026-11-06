@@ -74,7 +74,7 @@ function Player() {
 }
 ```
 
-In TSX `src` is required (see the [Video API](../modules/nsh-video.md)). See the
+In TSX give either `src` or (on web) `stream` (see the [Video API](../modules/nsh-video.md)). See the
 [web view and video guide](../docs/web-view-and-video.md).
 
 ## Props
@@ -84,6 +84,7 @@ A video takes the props of a [view](./view.md) (it has no children) plus:
 | Prop | Rust | Type | Default | Description |
 |---|---|---|---|---|
 | `src` | `video(url)` | `string` | | The video's URL (in Rust, an asset's `uri` too: `video(CLIP.uri)`). |
+| `stream` | — | `MediaStream \| null` | | **Web only.** A live stream (WebRTC / `getUserMedia`). See `Video.streamAvailable()`. |
 | `paused` | `.paused(..)` | `boolean` | `false` | Playback is paused. |
 | `muted` | `.muted(..)` | `boolean` | `false` | No sound. |
 | `volume` | `.volume(..)` | `number` | `1` | 0..1. |

@@ -20,7 +20,9 @@ See [Web view and video](../docs/web-view-and-video.md) for the guide and [`<Vid
 const Video: (props: VideoProps) => JSX.Element;
 
 interface VideoProps extends Omit<ViewProps, "children">, VideoHostProps {
-  src: string;
+  src?: string;
+  /** Web only — a live MediaStream (`Video.streamAvailable()`). */
+  stream?: MediaStream | null;
 }
 ```
 
@@ -61,7 +63,8 @@ mount(Player);
 
 | Prop | Type | Default | Description |
 |---|---|---|---|
-| `src` | `string` | (required) | The video's URL. |
+| `src` | `string` | | The video's URL. Mutually exclusive with `stream`; `stream` wins when both are set. |
+| `stream` | `MediaStream \| null` | | **Web only.** A live stream (WebRTC `ontrack`, `getUserMedia`). Check `Video.streamAvailable()` before using. |
 | `paused` | `boolean` | `false` | Playback is paused. |
 | `muted` | `boolean` | `false` | No sound. |
 | `volume` | `number` | `1` | 0..1. |

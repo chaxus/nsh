@@ -81,6 +81,7 @@ function Player() {
 | 属性 | Rust | 类型 | 默认值 | 说明 |
 |---|---|---|---|---|
 | `src` | `video(url)` | `string` | | 视频的 URL（在 Rust 中也可以是资源的 `uri`：`video(CLIP.uri)`）。 |
+| `stream` | — | `MediaStream \| null` | | **仅 Web。** 实时流（WebRTC / `getUserMedia`）。见 `Video.streamAvailable()`。 |
 | `paused` | `.paused(..)` | `boolean` | `false` | 暂停播放。 |
 | `muted` | `.muted(..)` | `boolean` | `false` | 静音。 |
 | `volume` | `.volume(..)` | `number` | `1` | 0..1。 |

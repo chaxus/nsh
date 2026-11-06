@@ -2,7 +2,7 @@
 // decoding and layout operations to Rust.
 const PLATFORM_PROPS = new Set(["ios", "android", "desktop", "web"]);
 
-export function createDom(invoke, values, reactive, live, wake) {
+export function createDom(invoke, values, reactive, live, wake, player) {
   const handlers = new WeakMap(), owners = new WeakMap(), heldProps = new WeakMap();
   let touches, measure, hot, platform;
   const prototype = Object.create(null);
@@ -50,6 +50,22 @@ export function createDom(invoke, values, reactive, live, wake) {
     // component is its hot proxy's memo) follows what it gives, as QuickJS'
     // renderer does (`followed` in nsh-js' `dom.rs`).
     if (name === "tooltip" && typeof value === "function") { bindProp(node, name, value); return; }
+    // WebRTC / getUserMedia: a MediaStream cannot cross the Wasm prop
+    // decoder. Keep it in the player and clear any URL `src` so they do
+    // not fight. Native hosts ignore `stream` (see Video.streamAvailable).
+    if (name === "stream") {
+      hold(node, name, value);
+      const id = values.nodeIds.get(node);
+      if (id !== undefined && player?.setVideoStream) {
+        const stream =
+          value && typeof value === "object" && typeof value.getTracks === "function"
+            ? value
+            : null;
+        player.setVideoStream(id, stream);
+        if (stream) call(303, [node, "src", null]);
+      }
+      return;
+    }
     if (/^on[A-Z]/.test(name)) {
       let events = handlers.get(node);
       if (!events) handlers.set(node, events = new Map());

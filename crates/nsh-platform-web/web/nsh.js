@@ -2057,6 +2057,8 @@ class Player {
       // A removed media element keeps playing until it is collected.
       clearInterval(el._progressTimer);
       el._video.pause();
+      el._stream = null;
+      el._video.srcObject = null;
       el._video.removeAttribute("src");
       el._video.load();
     }
@@ -5469,15 +5471,40 @@ class Player {
     this.webNavigation(el, "onLoad", false);
   }
 
+  /**
+   * Attach a MediaStream to a `<Video>` (web). Called from the browser
+   * facade when the app sets `stream={mediaStream}` — streams cannot cross
+   * the Wasm prop decoder. Pass `null` to detach.
+   */
+  setVideoStream(id, stream) {
+    const el = this.views.get(id);
+    const video = el?._video;
+    if (!video) return;
+    if (el._stream === stream) return;
+    el._stream = stream || null;
+    if (stream) {
+      el._src = "";
+      video.removeAttribute("src");
+      video.srcObject = stream;
+    } else {
+      video.srcObject = null;
+      if (!video.getAttribute("src")) video.load();
+    }
+  }
+
   op_video([, id, src, paused, muted, volume, rate, repeat, fit, controls, progressInterval]) {
     const el = this.view(id);
     const video = el?._video;
     if (!video) return;
-    const url = src ? this.asset(src) : "";
-    if (url !== el._src) {
-      el._src = url;
-      if (url) video.src = url;
-      else video.removeAttribute("src");
+    const hasStream = !!el._stream;
+    if (!hasStream) {
+      const url = src ? this.asset(src) : "";
+      if (url !== el._src) {
+        el._src = url;
+        video.srcObject = null;
+        if (url) video.src = url;
+        else video.removeAttribute("src");
+      }
     }
     el._progressInterval = progressInterval > 0 ? progressInterval : 250;
     video.muted = muted;
@@ -5486,8 +5513,9 @@ class Player {
     video.loop = repeat;
     video.controls = controls;
     video.className = `nsh-fill nsh-fit-${fit}`;
+    const canPlay = hasStream || !!el._src;
     if (paused) video.pause();
-    else if (url && video.paused) {
+    else if (canPlay && video.paused) {
       video.play().catch((err) => {
         // Browsers only start sound on their own after a user gesture.
         if (err?.name === "NotAllowedError" && !el._autoplayWarned) {
@@ -5513,7 +5541,7 @@ class Player {
       emit("onBuffer", { isBuffering: on });
     };
     video.addEventListener("loadstart", () => {
-      if (video.getAttribute("src")) emit("onLoadStart");
+      if (video.getAttribute("src") || video.srcObject || el._stream) emit("onLoadStart");
     });
     video.addEventListener("loadedmetadata", () =>
       emit("onLoad", { duration: video.duration || 0, width: video.videoWidth, height: video.videoHeight }));
@@ -5536,7 +5564,9 @@ class Player {
     video.addEventListener("error", () => {
       stopProgress();
       const e = video.error;
-      if (e && video.getAttribute("src")) emit("onError", { message: e.message || `media error ${e.code}` });
+      if (e && (video.getAttribute("src") || video.srcObject || el._stream)) {
+        emit("onError", { message: e.message || `media error ${e.code}` });
+      }
     });
   }
 

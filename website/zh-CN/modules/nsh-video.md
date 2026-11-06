@@ -20,7 +20,9 @@ import { Video, type VideoProps } from "nsh";
 const Video: (props: VideoProps) => JSX.Element;
 
 interface VideoProps extends Omit<ViewProps, "children">, VideoHostProps {
-  src: string;
+  src?: string;
+  /** 仅 Web — 实时 MediaStream（`Video.streamAvailable()`）。 */
+  stream?: MediaStream | null;
 }
 ```
 
@@ -61,7 +63,8 @@ mount(Player);
 
 | 属性 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `src` | `string` | （必填） | 视频的 URL。 |
+| `src` | `string` | | 视频的 URL。与 `stream` 互斥；同时设置时以 `stream` 为准。 |
+| `stream` | `MediaStream \| null` | | **仅 Web。** 实时流（WebRTC `ontrack`、`getUserMedia`）。使用前检查 `Video.streamAvailable()`。 |
 | `paused` | `boolean` | `false` | 暂停播放。 |
 | `muted` | `boolean` | `false` | 静音。 |
 | `volume` | `number` | `1` | 0..1。 |

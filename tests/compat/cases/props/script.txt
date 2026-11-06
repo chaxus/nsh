@@ -166,6 +166,8 @@ covers [props] fadeDuration
 # props-media-video
 tap id:case-props-media-video
 expect Play
+# Headless / native: MediaStream attachment is web-only.
+expect streamAvailable: false
 # The video as the platform receives it.
 prop id:clip src https://example.com/clip.mp4
 prop id:clip paused true
@@ -188,6 +190,7 @@ covers [props] repeat
 covers [props] controls
 covers [styles] objectFit
 covers [props] progressUpdateInterval
+covers [nsh] Video
 # props-media-webview
 tap id:case-props-media-webview
 expect HTML
