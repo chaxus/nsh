@@ -958,6 +958,72 @@ unsafe fn register_component(
     );
 }
 
+/// A live stream the embedding app registered (opaque to C): where it
+/// pushes the frames.
+pub struct NshStream(crate::StreamHandle);
+
+/// Registers live stream `name` (`MediaStream.fromHost(name)` in JS, played
+/// by `<Video srcObject>`) and returns where to push its frames
+/// ([`nsh_stream_push`]); free it with [`nsh_stream_free`], which ends the
+/// stream. Main thread.
+///
+/// # Safety
+///
+/// `app` must come from [`nsh_app_create`]; `name` must be a NUL-terminated
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_app_register_stream(
+    app: *mut NshApp,
+    name: *const c_char,
+) -> *mut NshStream {
+    // SAFETY: guaranteed by the caller.
+    let (app, name) = unsafe { (&*app, CStr::from_ptr(name)) };
+    let Ok(name) = name.to_str() else {
+        log::error!("stream name is not UTF-8");
+        return std::ptr::null_mut();
+    };
+    Box::into_raw(Box::new(NshStream(app.view.register_stream(name))))
+}
+
+/// Shows `frame`, a `CVPixelBufferRef`, in the videos playing the stream
+/// (retained while nsh holds it). Any thread.
+///
+/// # Safety
+///
+/// `stream` must be live (from [`nsh_app_register_stream`], not freed);
+/// `frame` a `CVPixelBufferRef` or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_stream_push(stream: *const NshStream, frame: *mut c_void) {
+    // SAFETY: guaranteed by the caller.
+    unsafe { (*stream).0.push(frame) };
+}
+
+/// Ends the stream: the videos playing it show nothing from now on. Any
+/// thread.
+///
+/// # Safety
+///
+/// `stream` must be live (from [`nsh_app_register_stream`], not freed).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_stream_end(stream: *const NshStream) {
+    // SAFETY: guaranteed by the caller.
+    unsafe { (*stream).0.end() };
+}
+
+/// Frees a stream's handle, ending the stream.
+///
+/// # Safety
+///
+/// `stream` must come from [`nsh_app_register_stream`] (or be null), and
+/// not be used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_stream_free(stream: *mut NshStream) {
+    if !stream.is_null() {
+        // SAFETY: guaranteed by the caller.
+        drop(unsafe { Box::from_raw(stream) });
+    }
+}
+
 /// Emits event `name` with `json` data (`NULL`: no data); the JS handler
 /// `on<Name>` gets it. Any thread.
 ///

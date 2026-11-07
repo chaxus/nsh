@@ -6,3 +6,4 @@
 
 pub mod notifications;
 pub mod speech;
+pub mod stream;

@@ -142,7 +142,8 @@ import { MediaStream, Video } from "nsh";
 没有注册的名字什么也不显示，和没有注册的[原生组件](../docs/native-components.md)一样，控制台会提示一次。前置摄像头的预览用视图自己的
 变换做镜像：`style={{ transform: [{ scaleX: -1 }] }}`（Rust：`.scale_x(-1.0)`）。
 
-目前 Web 平台播放实时流；原生平台在各自接入嵌入应用的流之前，对实时流什么也不显示，所以应用在依赖它之前先看 `platform.os`。
+Web、iOS 和 macOS 播放实时流（iOS 和 macOS 上由嵌入应用注册并推送帧：[实时流](../docs/native-components.md#实时流)）；
+Android、Windows 和 Linux 在各自接入嵌入应用的流之前，对实时流什么也不显示，所以应用在依赖它之前先看 `platform.os`。
 
 ## 能力声明
 

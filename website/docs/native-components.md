@@ -321,6 +321,7 @@ app.register(component: "embed.badge") { context in Badge(context) }
 | API | Description |
 |---|---|
 | `NshAppView.register(component:_:)` | Registers a factory `(NshComponentContext) -> NshComponent` under a name. It makes one component per element created from then on. Registering a name again replaces the factory. |
+| `NshAppView.register(stream:)` | Registers a [live stream](#live-streams) under a name and returns the `NshStream` its frames go to. |
 | `protocol NshComponent` | `var view: UIView` (fills the container), `setProp(_:_:)`, `command(_:_:)` (optional: the default ignores commands). Main-actor isolated. |
 | `setProp(_ name: String, _ value: Any?)` | Values are Foundation JSON objects: `String`, `NSNumber`, `[Any]`, `[String: Any]`, `NSNull`; `nil` when the prop was removed. |
 | `NshComponentContext.emit(_:_:)` | Emits an event; the data must be something `JSONSerialization` accepts (or `nil`). Thread-safe. |
@@ -671,6 +672,27 @@ nsh-platform-macos = { version = "0.3", default-features = false }
 
 The host registers the crate's components when it makes each view, before the code holding the view registers its
 own: a name registered on the view after that (`AppView::register_component`) replaces the crate's.
+
+## Live streams
+
+A video plays a live stream the embedding app registers, by name, as it uses a native component: `<Video
+srcObject={MediaStream.fromHost("call.remote")}>` ([Live streams](../elements/video.md#live-streams)). The app
+registers the stream and pushes its frames, from any thread; NSH draws them in the video, with its `objectFit`,
+`paused` and `onLoad`. On iOS the frames are `CVPixelBuffer`s, as a camera, a call's SDK or ReplayKit hands them out:
+
+```swift
+let stream = app.register(stream: "call.remote")   // NshStream
+// From the capture's queue, for every frame:
+stream.push(pixelBuffer)
+// When the call ends: the videos show nothing until the name is registered again.
+stream.end()
+```
+
+On macOS, and from an app's own crate on both ([Registering from the app's crate](#registering-from-the-apps-crate)),
+the same in Rust: `app.register_stream("call.remote")` or `components.register_stream(..)` returns a `StreamHandle`,
+whose `push(frame)` takes a `CVPixelBufferRef` and whose `end()` ends the stream (dropping the handle does too).
+A name nothing registered shows nothing, logged once, as an unregistered component does; a video that names a stream
+before it is registered shows it once it is.
 
 ## Rules and limits
 

@@ -307,6 +307,7 @@ app.register(component: "embed.badge") { context in Badge(context) }
 | API | 说明 |
 |---|---|
 | `NshAppView.register(component:_:)` | 以某个名称注册一个工厂 `(NshComponentContext) -> NshComponent`。此后每创建一个元素，它就生成一个组件。重复注册同一名称会替换工厂。 |
+| `NshAppView.register(stream:)` | 以某个名称注册一个[实时流](#实时流)，返回接收它的帧的 `NshStream`。 |
 | `protocol NshComponent` | `var view: UIView`（铺满容器）、`setProp(_:_:)`、`command(_:_:)`（可选：默认实现忽略命令）。隔离在 main actor 上。 |
 | `setProp(_ name: String, _ value: Any?)` | 值是 Foundation 的 JSON 对象：`String`、`NSNumber`、`[Any]`、`[String: Any]`、`NSNull`；prop 被移除时为 `nil`。 |
 | `NshComponentContext.emit(_:_:)` | 发出一个事件；数据必须是 `JSONSerialization` 能接受的值（或 `nil`）。线程安全。 |
@@ -644,6 +645,25 @@ nsh-platform-macos = { version = "0.3", default-features = false }
 ```
 
 宿主在创建每个视图时注册 crate 的组件，早于持有该视图的代码自己的注册：之后在视图上注册的同名组件（`AppView::register_component`）会替换 crate 的。
+
+## 实时流
+
+视频可以播放嵌入应用按名字注册的实时流，用法和原生组件一样：`<Video srcObject={MediaStream.fromHost("call.remote")}>`
+（[实时流](../elements/video.md#实时流)）。应用注册流并推送帧，任何线程都可以；NSH 把帧画进视频，`objectFit`、`paused`
+和 `onLoad` 照常生效。iOS 上帧是 `CVPixelBuffer`，摄像头、通话 SDK 和 ReplayKit 给出的正是它：
+
+```swift
+let stream = app.register(stream: "call.remote")   // NshStream
+// 在采集的队列上，每一帧：
+stream.push(pixelBuffer)
+// 通话结束：视频什么也不显示，直到这个名字再次被注册。
+stream.end()
+```
+
+macOS 上，以及两个平台上应用自己的 crate 里（[从应用的 crate 注册](#从应用的-crate-注册)），Rust 的写法相同：
+`app.register_stream("call.remote")` 或 `components.register_stream(..)` 返回一个 `StreamHandle`，它的 `push(frame)` 接受
+`CVPixelBufferRef`，`end()` 结束流（丢弃句柄也会结束）。没有注册的名字什么也不显示，日志记一次，和没有注册的组件一样；
+先引用名字、后注册的视频，在注册后开始显示。
 
 ## 规则与限制
 

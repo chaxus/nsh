@@ -149,8 +149,9 @@ gets); `null` takes it away. A name nothing registered shows nothing, as a [nati
 component](../docs/native-components.md) nothing registered does, and the console says so once. A front camera's
 preview is mirrored with the view's own transform: `style={{ transform: [{ scaleX: -1 }] }}` (Rust: `.scale_x(-1.0)`).
 
-The web plays streams today; the native platforms show nothing for one until each takes streams from its embedding
-app, so an app checks `platform.os` before it relies on one.
+The web, iOS and macOS play streams (on iOS and macOS the embedding app registers one and pushes its frames:
+[Live streams](../docs/native-components.md#live-streams)); Android, Windows and Linux show nothing for one until
+each takes streams from its embedding app, so an app checks `platform.os` before it relies on one.
 
 ## Capabilities
 

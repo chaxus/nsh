@@ -104,6 +104,8 @@ pub struct Components {
     factories: Rc<RefCell<FxHashMap<Arc<str>, ComponentFactory>>>,
     /// Names already reported as unknown.
     missing: Rc<RefCell<FxHashSet<Arc<str>>>>,
+    /// The live streams the embedding app registers (`<Video srcObject>`).
+    streams: nsh_platform_apple::stream::Streams,
 }
 
 impl std::fmt::Debug for Components {
@@ -119,6 +121,7 @@ impl Default for Components {
         let components = Components {
             factories: Rc::default(),
             missing: Rc::default(),
+            streams: Default::default(),
         };
         // NSH's own: what `nsh/base`'s exports render.
         components.insert(TAB_BAR_COMPONENT, crate::system_tab_bar::factory());
@@ -136,6 +139,19 @@ impl Components {
             return;
         }
         self.insert(name, factory);
+    }
+
+    /// Registers live stream `name` (`MediaStream.fromHost(name)` in JS,
+    /// played by `<Video srcObject>`): the handle takes its frames, from
+    /// any thread. The videos naming it, now or later, show them. Main
+    /// thread.
+    pub fn register_stream(&self, name: &str) -> nsh_platform_apple::stream::StreamHandle {
+        self.streams.register(name)
+    }
+
+    /// The streams, for the videos.
+    pub(crate) fn streams(&self) -> nsh_platform_apple::stream::Streams {
+        self.streams.clone()
     }
 
     fn insert(&self, name: &str, factory: ComponentFactory) {

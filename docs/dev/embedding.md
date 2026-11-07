@@ -60,7 +60,14 @@
 - **Live streams** (`<Video srcObject>`, `nsh`'s `MediaStream`): the embedding app registers a stream by name and
   the app's video names it with `MediaStream.fromHost(name)`; the name crosses as `VideoProps::stream`
   (`NativeProp::SrcObject`), the frames never pass through JS. The web page registers one with the player's
-  `registerStream(name, stream)` (`docs/dev/web.md` "Videos"); a native backend that does not take streams yet shows
+  `registerStream(name, stream)` (`docs/dev/web.md` "Videos"). On iOS and macOS the registry is the surface's
+  `Components` (`register_stream(name) -> StreamHandle`, `nsh_platform_apple::stream`): Swift
+  `NshAppView.register(stream:)` (`nsh_app_register_stream`, `nsh_stream_push` / `nsh_stream_end` / `nsh_stream_free`),
+  Rust `AppView::register_stream`, an app's crate through `#[native_components]`; the host pushes `CVPixelBuffer`s
+  from any thread, the newest waits for one main-thread dispatch, and each video showing the name draws them in an
+  `AVSampleBufferDisplayLayer` (`videoGravity` from `resize_mode`, `onLoad` from the first frame's size, `paused`
+  keeps the last frame). A name is one entry whether registered or asked for first, so a video attached before the
+  registration draws once it comes. A backend that does not take streams yet (Android, Windows, Linux, GPUI) shows
   nothing for one, as for a native component it has not registered.
 - **Native components** (`nsh`'s `nativeComponent`; `component.rs`, `ComponentBox.java`): the embedding app registers its own native
   views by name — Swift `NshAppView.register(component:) { context in … }` (`NshComponent`: `view`, `setProp`,
