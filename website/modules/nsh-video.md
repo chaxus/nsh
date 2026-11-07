@@ -20,7 +20,9 @@ See [Web view and video](../docs/web-view-and-video.md) for the guide and [`<Vid
 const Video: (props: VideoProps) => JSX.Element;
 
 interface VideoProps extends Omit<ViewProps, "children">, VideoHostProps {
-  src: string;
+  src?: string;
+  /** A live stream played instead of `src`, on the web. */
+  srcObject?: MediaStream | null;
 }
 ```
 

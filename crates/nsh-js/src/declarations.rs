@@ -851,6 +851,8 @@ fn globals() -> String {
         out.push('\n');
         out.push_str(types);
     }
+    out.push('\n');
+    out.push_str(crate::platform_modules::MEDIA_STREAM_TYPES);
     for spec in crate::web::declared_specs() {
         let ts = &spec.ts;
         out.push('\n');

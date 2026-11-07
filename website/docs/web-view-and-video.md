@@ -493,6 +493,7 @@ In Rust, `video(url)` makes the player (the URL a value, a signal or a closure) 
 | Prop | Type | Default | Description |
 |---|---|---|---|
 | `src` | `string` | | The video's URL. |
+| `srcObject` | `MediaStream \| null` | `null` | A live stream played instead of `src`, on the web: WebRTC, `getUserMedia()`, `captureStream()` ([Live streams](../elements/video.md#live-streams)). |
 | `paused` | `boolean` | `false` | Playback is paused. |
 | `muted` | `boolean` | `false` | No sound. |
 | `volume` | `number` | `1` | 0..1. |

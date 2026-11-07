@@ -74,7 +74,7 @@ function Player() {
 }
 ```
 
-In TSX `src` is required (see the [Video API](../modules/nsh-video.md)). See the
+In TSX a video plays `src` or a live stream, `srcObject` (see the [Video API](../modules/nsh-video.md)). See the
 [web view and video guide](../docs/web-view-and-video.md).
 
 ## Props
@@ -84,6 +84,7 @@ A video takes the props of a [view](./view.md) (it has no children) plus:
 | Prop | Rust | Type | Default | Description |
 |---|---|---|---|---|
 | `src` | `video(url)` | `string` | | The video's URL (in Rust, an asset's `uri` too: `video(CLIP.uri)`). |
+| `srcObject` | | `MediaStream \| null` | `null` | A live stream played instead of `src`, on the web (see [Live streams](#live-streams)). |
 | `paused` | `.paused(..)` | `boolean` | `false` | Playback is paused. |
 | `muted` | `.muted(..)` | `boolean` | `false` | No sound. |
 | `volume` | `.volume(..)` | `number` | `1` | 0..1. |
@@ -95,6 +96,28 @@ A video takes the props of a [view](./view.md) (it has no children) plus:
 
 Give the video a size through its styles; its size is the one its styles give it. Use the size `onLoad` reports to set
 an aspect ratio when you want the video's own proportions.
+
+## Live streams
+
+`srcObject` plays a live stream instead of `src`, as the DOM's `HTMLMediaElement.srcObject` does. On the web it takes
+a `MediaStream`: a WebRTC peer's tracks, `getUserMedia()`'s camera or a canvas's `captureStream()`. The stream stays
+in the browser and plays without passing through the engine. While it is set it wins over `src`; `null` gives the
+video its `src` back. A live stream's `duration` in `onLoad` and `onProgress` is 0. The stream stays the app's, so
+the app stops its tracks when it is done; the video lets go of it when it unmounts. The native platforms
+take stream sources of their own (tracks the host app provides, capture) in a later release; until then they keep
+the video's other props.
+
+```tsx
+import { signal, Video } from "nsh";
+
+const stream = signal<MediaStream | null>(null);
+pc.ontrack = (e) => stream.set(e.streams[0]);
+
+<Video srcObject={stream()} muted style={{ height: 220 }} />;
+```
+
+`MediaStream` is declared for every app with its `id` and `active`. The browser APIs that make one
+(`RTCPeerConnection`, `navigator.mediaDevices`) are the page's, so web-only code reaches them on `globalThis`.
 
 ## Events
 

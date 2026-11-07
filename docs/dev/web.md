@@ -783,7 +783,13 @@ scroll events postpone it, and the browser's `scrollend` cancels it.
 - **Videos** are `<video>`s: `onLoadStart`, `onLoad` (`loadedmetadata`), `onProgress` on a timer at
   `progressUpdateInterval` while playing, `onBuffer` (`waiting` / `playing` / `canplay`), `onEnd`, `onError`; a
   deleted video is stopped (a detached media element plays on). Browsers only start a video with sound after a user
-  gesture (a warning says so).
+  gesture (a warning says so). A video's `srcObject` (a `MediaStream`) never leaves the page's JavaScript:
+  `browser/dom.js` hands it to the player (`setVideoSrcObject`, by view id) instead of the engine, and the player sets
+  the `<video>`'s `srcObject`, which wins over `src` while it is set (`videoSource`); QuickJS' renderer accepts and
+  drops it (`set_prop` in nsh-js' `dom.rs`), so the native platforms keep the video's other props. The player lets go
+  of a stream when the video's owner is cleaned up (a `reactive.cleanup` registered with the first `srcObject`, not
+  the node's collection, `op_d`), when `srcObject` changes and when a run starts. Events report a live stream's
+  `Infinity` duration (and an unknown `NaN`) as 0 (`mediaDuration`).
 - **Registered native components** are the native apps' own: their view stays empty, with a warning once per name.
 - **The host** (`nsh`'s `host`): the page answers the app's calls with `createPlayer`'s `host` option, an object whose
   `call(name, args)` returns the result or a promise of it. `Command::HostCall` is the command `hostCall` (`encode.rs`;

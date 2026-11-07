@@ -72,7 +72,7 @@ function Player() {
 }
 ```
 
-在 TSX 中 `src` 必填（参见 [Video API](../modules/nsh-video.md)）。另见 [Web view 与视频指南](../docs/web-view-and-video.md)。
+在 TSX 中视频播放 `src` 或实时流 `srcObject`（参见 [Video API](../modules/nsh-video.md)）。另见 [Web view 与视频指南](../docs/web-view-and-video.md)。
 
 ## 属性
 
@@ -81,6 +81,7 @@ function Player() {
 | 属性 | Rust | 类型 | 默认值 | 说明 |
 |---|---|---|---|---|
 | `src` | `video(url)` | `string` | | 视频的 URL（在 Rust 中也可以是资源的 `uri`：`video(CLIP.uri)`）。 |
+| `srcObject` | | `MediaStream \| null` | `null` | 代替 `src` 播放的实时流，在 Web 上播放（见[实时流](#实时流)）。 |
 | `paused` | `.paused(..)` | `boolean` | `false` | 暂停播放。 |
 | `muted` | `.muted(..)` | `boolean` | `false` | 静音。 |
 | `volume` | `.volume(..)` | `number` | `1` | 0..1。 |
@@ -91,6 +92,25 @@ function Player() {
 | `progressUpdateInterval` | `.progress_interval(ms)` | `number` | `250` | `onProgress` 事件之间的毫秒数。 |
 
 请通过样式给视频一个尺寸，它的尺寸由样式决定。如果需要视频本身的比例，可以用 `onLoad` 报告的尺寸设置宽高比。
+
+## 实时流
+
+`srcObject` 播放一个实时流来代替 `src`，与 DOM 的 `HTMLMediaElement.srcObject` 相同。在 Web 上它接受一个
+`MediaStream`：WebRTC 对端的轨道、`getUserMedia()` 的摄像头或画布的 `captureStream()`。流留在浏览器中播放，不经过引擎。
+设置了它时它优先于 `src`；设为 `null` 时视频回到 `src`。实时流在 `onLoad` 和 `onProgress` 中的 `duration` 为 0。流归应用所有，用完时由应用停止它的轨道；视频卸载时会释放它。原生平台会在之后的版本中获得
+自己的流来源（宿主应用提供的轨道、采集）；在那之前它们照常应用视频的其他属性。
+
+```tsx
+import { signal, Video } from "nsh";
+
+const stream = signal<MediaStream | null>(null);
+pc.ontrack = (e) => stream.set(e.streams[0]);
+
+<Video srcObject={stream()} muted style={{ height: 220 }} />;
+```
+
+每个应用都声明了 `MediaStream` 及其 `id` 和 `active`。创建它的浏览器 API（`RTCPeerConnection`、`navigator.mediaDevices`）属于页面，
+只在 Web 上运行的代码通过 `globalThis` 访问它们。
 
 ## 事件
 

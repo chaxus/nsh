@@ -487,6 +487,7 @@ mount(Player);
 | 属性 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `src` | `string` | | 视频的 URL。 |
+| `srcObject` | `MediaStream \| null` | `null` | 代替 `src` 播放的实时流，在 Web 上播放：WebRTC、`getUserMedia()`、`captureStream()`（[实时流](../elements/video.md#实时流)）。 |
 | `paused` | `boolean` | `false` | 暂停播放。 |
 | `muted` | `boolean` | `false` | 静音。 |
 | `volume` | `number` | `1` | 0..1。 |

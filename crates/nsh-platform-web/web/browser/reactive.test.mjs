@@ -53,6 +53,51 @@ test("platform props set the props of the web's and the desktop's objects and ig
   assert.deepEqual(props(), []);
 });
 
+test("a video's srcObject goes to the player and never to the engine", () => {
+  const values = new Values();
+  const calls = [];
+  const invoke = (op, args) => { calls.push([op, args]); return op === 300 ? values.makeNode(args[0] === "video" ? 2 : 4) : undefined; };
+  const cleanups = [];
+  let alive = true;
+  const dom = createDom(invoke, values, { getOwner: () => null, cleanup: (fn) => cleanups.push(fn) }, () => alive, () => {});
+  dom.setPlatform({ os: "web", desktop: true });
+  const given = [];
+  dom.setSrcObjects((id, stream) => given.push([id, stream]));
+  const video = dom.rt.element("video");
+  const stream = { id: "stream" };
+  const props = () => calls.filter(([op]) => op === 303).map(([, [, name]]) => name);
+
+  dom.rt.prop(video, "srcObject", stream);
+  dom.rt.prop(video, "muted", true);
+  assert.deepEqual(given, [[2, stream]]);
+  assert.deepEqual(props(), ["muted"]);
+
+  // Cleared by null or undefined.
+  given.length = 0;
+  dom.rt.prop(video, "srcObject", null);
+  dom.rt.prop(video, "srcObject", stream);
+  dom.rt.prop(video, "srcObject", undefined);
+  assert.deepEqual(given, [[2, null], [2, stream], [2, null]]);
+
+  // Only a video's goes to the player.
+  given.length = 0;
+  const view = dom.rt.element("view");
+  dom.rt.prop(view, "srcObject", stream);
+  assert.deepEqual(given, []);
+
+  // The video's owner going clears its stream once, without waiting for
+  // the node to be collected.
+  dom.rt.prop(video, "srcObject", stream);
+  given.length = 0;
+  assert.equal(cleanups.length, 1);
+  cleanups[0]();
+  assert.deepEqual(given, [[2, null]]);
+
+  // A disposed app sets no stream.
+  alive = false;
+  assert.throws(() => dom.rt.prop(video, "srcObject", stream), /disposed/);
+});
+
 test("browser web view refs forward sendInput to the command bridge", () => {
   const values = new Values();
   const calls = [];

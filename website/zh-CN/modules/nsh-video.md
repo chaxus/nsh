@@ -20,7 +20,9 @@ import { Video, type VideoProps } from "nsh";
 const Video: (props: VideoProps) => JSX.Element;
 
 interface VideoProps extends Omit<ViewProps, "children">, VideoHostProps {
-  src: string;
+  src?: string;
+  /** A live stream played instead of `src`, on the web. */
+  srcObject?: MediaStream | null;
 }
 ```
 

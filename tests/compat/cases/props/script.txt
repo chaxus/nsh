@@ -188,6 +188,18 @@ covers [props] repeat
 covers [props] controls
 covers [styles] objectFit
 covers [props] progressUpdateInterval
+# props-media-video-stream
+tap id:case-props-media-video-stream
+expect Live
+# The stream is the web runtime's: here the video keeps its other props.
+prop id:live src https://example.com/fallback.mp4
+prop id:live muted true
+# Cleared and set again, the app runs on.
+tap id:swap
+expect Stopped
+prop id:live src https://example.com/fallback.mp4
+tap id:swap
+expect Live
 # props-media-webview
 tap id:case-props-media-webview
 expect HTML

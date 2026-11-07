@@ -1271,6 +1271,12 @@ fn set_prop(
             return set_prop(cx, content, name, value, prev);
         }
         "tooltip" if followed(cx, name, value) => return bind_prop_with(cx, node, name, value),
+        // A video's live stream (a `MediaStream`) is played by the web
+        // runtime alone, whose `browser/dom.js` hands it to the player;
+        // nothing of it goes to the core, and no native platform has
+        // stream sources yet.
+        // SAFETY: live node data.
+        "srcObject" if unsafe { (*p).tag } == Some(Tag::Video) => return Ok(()),
         _ => {}
     }
     if let Some(prop) = nsh_core::js::host::style_patch_prop(name) {

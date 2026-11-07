@@ -536,7 +536,24 @@ pub(crate) const VIDEO_EXPORTS: &[Item] = &[(
 /// `Video`'s types.
 pub(crate) const VIDEO_TYPES: &str = r#"export interface VideoProps extends Omit<ViewProps, "children" | "ref">, VideoHostProps {
   ref?: VideoRef | ((node: VideoRef) => void);
-  src: string;
+  /** The video's URL; `srcObject` wins over it. */
+  src?: string;
+  /** A live stream to play instead of `src` (the DOM's `srcObject`):
+   * played on the web, where a `MediaStream` comes from WebRTC (an
+   * `RTCPeerConnection`'s `track` event), `getUserMedia()` or a canvas's
+   * `captureStream()`; the native platforms show nothing for it yet.
+   * `null` clears it. The stream stays the app's: the app stops its
+   * tracks. */
+  srcObject?: MediaStream | null;
+}
+"#;
+
+/// The global type `Video`'s `srcObject` takes (in `globals.d.ts`).
+pub(crate) const MEDIA_STREAM_TYPES: &str = r#"/** The browser's `MediaStream` (Media Capture and Streams), which `Video`'s
+ * `srcObject` plays; it merges with the DOM library's. */
+interface MediaStream {
+  readonly id: string;
+  readonly active: boolean;
 }
 "#;
 

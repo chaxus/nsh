@@ -1551,3 +1551,86 @@ test("a mouse makes a desktop at any width, a touch screen a tablet or a phone (
     globalThis.screen = saved.screen;
   }
 });
+
+/** A `<video>` element's media state: its `src` attribute, stream and playing. */
+function fakeVideo() {
+  const attributes = new Map();
+  return {
+    srcObject: null,
+    paused: true,
+    plays: 0,
+    set src(value) { attributes.set("src", value); },
+    getAttribute: (name) => attributes.get(name) ?? null,
+    removeAttribute: (name) => attributes.delete(name),
+    play() { this.plays += 1; this.paused = false; return Promise.resolve(); },
+    pause() { this.paused = true; },
+  };
+}
+
+function videoPlayer() {
+  const { player } = fakePlayer();
+  Object.assign(player, { views: new Map(), srcObjects: new Map(), asset: (src) => src });
+  return player;
+}
+
+// `op_video`'s fields after the id: src, paused, muted, volume, rate, repeat, fit, controls, progress interval.
+const videoOp = (id, src, paused = false) => ["video", id, src, paused, true, 1, 1, false, "contain", false, 0];
+
+test("a video's srcObject set before its element exists is applied by its props, and wins over src", () => {
+  const player = videoPlayer();
+  const stream = { id: "stream" };
+  player.setVideoSrcObject(2, stream);
+  const video = fakeVideo();
+  player.views.set(2, { _id: 2, _video: video, _events: new Set() });
+  player.op_video(videoOp(2, "movie.mp4"));
+  assert.equal(video.srcObject, stream);
+  assert.equal(video.getAttribute("src"), null);
+  assert.equal(video.plays, 1);
+});
+
+test("a video's srcObject replaces its src and, cleared, gives the src back", () => {
+  const player = videoPlayer();
+  const video = fakeVideo();
+  player.views.set(2, { _id: 2, _video: video, _events: new Set() });
+  player.op_video(videoOp(2, "movie.mp4", true));
+  assert.equal(video.getAttribute("src"), "movie.mp4");
+
+  const stream = { id: "stream" };
+  player.setVideoSrcObject(2, stream);
+  assert.equal(video.srcObject, stream);
+  assert.equal(video.getAttribute("src"), null);
+  // Paused by its `paused` prop, a stream does not start it.
+  assert.equal(video.plays, 0);
+
+  player.op_video(videoOp(2, "movie.mp4"));
+  assert.equal(video.getAttribute("src"), null);
+  assert.equal(video.plays, 1);
+
+  player.setVideoSrcObject(2, null);
+  assert.equal(video.srcObject, null);
+  assert.equal(video.getAttribute("src"), "movie.mp4");
+  assert.equal(player.srcObjects.size, 0);
+});
+
+test("a stream alone plays a video without a src", () => {
+  const player = videoPlayer();
+  const video = fakeVideo();
+  player.views.set(2, { _id: 2, _video: video, _events: new Set() });
+  player.op_video(videoOp(2, ""));
+  assert.equal(video.plays, 0);
+  player.setVideoSrcObject(2, { id: "stream" });
+  assert.equal(video.plays, 1);
+});
+
+test("a live stream's video reports a duration of 0, not Infinity", () => {
+  const player = videoPlayer();
+  const sent = [];
+  player.event = (id, name, payload) => sent.push([name, payload]);
+  const handlers = new Map();
+  const video = { ...fakeVideo(), duration: Infinity, videoWidth: 640, videoHeight: 360, currentTime: 3,
+    addEventListener: (name, fn) => handlers.set(name, fn) };
+  const el = { _id: 2, _video: video, _events: new Set(["onLoad"]) };
+  player.wireVideo(el, video);
+  handlers.get("loadedmetadata")();
+  assert.deepEqual(sent, [["onLoad", { duration: 0, width: 640, height: 360 }]]);
+});
