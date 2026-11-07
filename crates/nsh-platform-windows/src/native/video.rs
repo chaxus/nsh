@@ -22,6 +22,14 @@
 //! ending), `onError`. `controls` draws a control bar of nsh's own (play /
 //! pause, a scrubber, the time) that drives the engine directly, as the
 //! platforms' controls do.
+//!
+//! A live stream (`srcObject`, [`VideoProps::stream`]) plays instead of a
+//! source: no engine, the video attaches to the stream of that name in
+//! the surface's registry ([`crate::stream`]) and copies each frame the
+//! embedding app pushes into a Direct2D bitmap (`CopyFromMemory`), drawn
+//! through the same fit as the engine's texture. The first frame's size is
+//! `onLoad` (duration 0), `paused` keeps the last frame, the stream's end
+//! blanks the picture.
 
 use std::{
     cell::{Cell, RefCell},
@@ -36,8 +44,8 @@ use windows::{
         Graphics::{
             Direct2D::{
                 Common::{
-                    D2D1_ALPHA_MODE_IGNORE, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
-                    D2D1_PIXEL_FORMAT,
+                    D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED,
+                    D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, D2D1_PIXEL_FORMAT,
                 },
                 D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1, D2D1_DRAW_TEXT_OPTIONS_NONE,
                 D2D1_ELLIPSE, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_ROUNDED_RECT, ID2D1Bitmap1,
@@ -79,6 +87,7 @@ use crate::{
     image::AssetBase,
     input::{Cursor, PointerKind},
     render::{DrawCx, rect_f},
+    stream::{Attached, StreamEvent, Streams},
     surface::Surface,
     view::{Hosted, ItemPointer},
     window::UiThread,
@@ -94,12 +103,17 @@ const TIME: f32 = 96.0;
 /// first frame) before the frame client stops (seconds).
 const FRAME_WAIT: f64 = 3.0;
 
-/// A video: its media engine and the picture its view shows.
+/// A video: its media engine (or the live stream it shows) and the picture
+/// its view shows.
 pub(crate) struct VideoItem {
     emitter: Emitter,
     key: u64,
     id: NodeId,
     engine: RefCell<Option<IMFMediaEngine>>,
+    /// The surface's live streams.
+    streams: Streams,
+    /// The stream it shows (`srcObject`) instead of a source.
+    stream: RefCell<Option<Attached>>,
     /// Bumped with every source opened (and when closed): notifications
     /// for another serial are stale.
     serial: Cell<u64>,
@@ -131,9 +145,11 @@ struct Status {
     playing: Cell<bool>,
 }
 
-/// A frame in a texture shared with Direct2D.
+/// A frame: the engine's, in a texture shared with Direct2D, or a
+/// stream's, a bitmap of the frame's bytes.
 struct Frame {
-    texture: ID3D11Texture2D,
+    /// The engine's target; `None` for a stream's frame.
+    texture: Option<ID3D11Texture2D>,
     bitmap: ID2D1Bitmap1,
     size: (u32, u32),
     /// The device generation they were made in.
@@ -149,6 +165,8 @@ impl VideoItem {
             key: surface.key(),
             id,
             engine: RefCell::new(None),
+            streams: surface.native.components().streams(),
+            stream: RefCell::new(None),
             serial: Cell::new(0),
             status: Status::default(),
             props: RefCell::new(None),
@@ -168,9 +186,27 @@ impl VideoItem {
         base: Option<&AssetBase>,
     ) {
         let old = self.props.borrow_mut().take();
-        let reopened = old.as_ref().is_none_or(|o| o.source != p.source);
-        if reopened {
-            self.open(surface, p.source.as_deref(), base);
+        if let Some(name) = &p.stream {
+            // A live stream plays instead of the URL: the engine goes, the
+            // frames the embedding app pushes are drawn.
+            let changed = self
+                .stream
+                .borrow()
+                .as_ref()
+                .is_none_or(|s| s.name() != &**name);
+            if changed {
+                self.close();
+                self.show_stream(surface, name);
+            }
+            if let Some(stream) = &*self.stream.borrow() {
+                stream.set_paused(p.paused);
+            }
+        } else {
+            let shown = self.stream.borrow_mut().take().is_some();
+            let reopened = shown || old.as_ref().is_none_or(|o| o.source != p.source);
+            if reopened {
+                self.open(surface, p.source.as_deref(), base);
+            }
         }
         *self.props.borrow_mut() = Some(p.clone());
         self.status.playing.set(!p.paused);
@@ -244,10 +280,125 @@ impl VideoItem {
         self.want_frame.set(Some(surface.clock() + FRAME_WAIT));
     }
 
-    /// Stops the engine and forgets the source (the last frame stays, for
-    /// a removal animation).
+    /// Shows stream `name`, fed by the surface's streams: its sink finds
+    /// the video again by surface key and node id on the UI thread, as the
+    /// engine's notifications do.
+    fn show_stream(&self, surface: &Rc<Surface>, name: &str) {
+        self.emitter
+            .emit(EventKind::LoadStart, || EventPayload::None);
+        let (key, id) = (self.key, self.id);
+        let sink = Box::new(move |event: StreamEvent<'_>| {
+            let Some(surface) = Surface::by_key(key) else {
+                return;
+            };
+            let item = match surface.native.hosts.try_borrow() {
+                Ok(hosts) => match hosts.get(&id) {
+                    Some(super::Host::Video(item)) => Some(item.clone()),
+                    _ => None,
+                },
+                Err(_) => None,
+            };
+            if let Some(item) = item {
+                item.stream_event(&surface, event);
+            }
+        });
+        *self.stream.borrow_mut() = Some(self.streams.attach(name, sink));
+        surface.invalidate();
+    }
+
+    /// A frame of the stream, or its end, on the UI thread.
+    fn stream_event(&self, surface: &Surface, event: StreamEvent<'_>) {
+        match event {
+            StreamEvent::Frame(frame) => {
+                if !self.show_frame(frame) {
+                    return;
+                }
+                if !self.status.loaded.replace(true) {
+                    let (w, h) = (frame.width as u32, frame.height as u32);
+                    self.natural.set((w, h));
+                    self.emitter
+                        .emit(EventKind::Load, || load_payload(0.0, w, h));
+                }
+            }
+            StreamEvent::Ended => {
+                *self.frame.borrow_mut() = None;
+                self.status.loaded.set(false);
+                self.natural.set((0, 0));
+            }
+        }
+        surface.invalidate();
+    }
+
+    /// Copies a stream's frame into the bitmap (made again for a new size
+    /// or device, or after the engine's texture).
+    fn show_frame(&self, frame: &crate::stream::Frame) -> bool {
+        let Ok(gfx) = gfx::get() else { return false };
+        let generation = gfx::generation();
+        let size = (frame.width as u32, frame.height as u32);
+        let pitch = frame.stride as u32;
+        let mut slot = self.frame.borrow_mut();
+        if let Some(f) = slot.as_mut()
+            && f.texture.is_none()
+            && f.size == size
+            && f.generation == generation
+        {
+            // SAFETY: `bytes` holds `height` rows of `stride` bytes, as the
+            // registry checked; the bitmap is as large as the frame.
+            return match unsafe {
+                f.bitmap
+                    .CopyFromMemory(None, frame.bytes.as_ptr().cast(), pitch)
+            } {
+                Ok(()) => {
+                    f.filled = true;
+                    true
+                }
+                Err(err) => {
+                    log::debug!("video: stream frame not copied: {err}");
+                    false
+                }
+            };
+        }
+        let props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+            colorContext: std::mem::ManuallyDrop::new(None),
+        };
+        let d2d_size = D2D_SIZE_U {
+            width: size.0,
+            height: size.1,
+        };
+        // SAFETY: as above, on the thread's device context.
+        match unsafe {
+            gfx.dc
+                .CreateBitmap(d2d_size, Some(frame.bytes.as_ptr().cast()), pitch, &props)
+        } {
+            Ok(bitmap) => {
+                *slot = Some(Frame {
+                    texture: None,
+                    bitmap,
+                    size,
+                    generation,
+                    filled: true,
+                });
+                true
+            }
+            Err(err) => {
+                log::warn!("video: cannot make a bitmap of a stream's frame: {err}");
+                false
+            }
+        }
+    }
+
+    /// Stops the engine, detaches from the stream and forgets the source
+    /// (the last frame stays, for a removal animation).
     pub(crate) fn close(&self) {
         self.serial.set(self.serial.get() + 1);
+        self.stream.borrow_mut().take();
         if let Some(engine) = self.engine.borrow_mut().take() {
             // SAFETY: calls on a live engine; it is not used afterwards.
             unsafe {
@@ -444,7 +595,7 @@ impl VideoItem {
         let mut slot = self.frame.borrow_mut();
         if slot
             .as_ref()
-            .is_none_or(|f| f.size != (w, h) || f.generation != generation)
+            .is_none_or(|f| f.texture.is_none() || f.size != (w, h) || f.generation != generation)
         {
             *slot = match make_frame(&gfx, (w, h), generation) {
                 Ok(frame) => Some(frame),
@@ -455,6 +606,9 @@ impl VideoItem {
             };
         }
         let Some(frame) = slot.as_mut() else {
+            return false;
+        };
+        let Some(texture) = &frame.texture else {
             return false;
         };
         let rect = RECT {
@@ -471,7 +625,7 @@ impl VideoItem {
         };
         // SAFETY: the texture is a render target of the engine's device,
         // as large as `rect`.
-        match unsafe { engine.TransferVideoFrame(&frame.texture, None, &rect, Some(&black)) } {
+        match unsafe { engine.TransferVideoFrame(texture, None, &rect, Some(&black)) } {
             Ok(()) => {
                 frame.filled = true;
                 true
@@ -484,7 +638,11 @@ impl VideoItem {
     }
 
     fn controls(&self) -> bool {
-        self.props.borrow().as_ref().is_some_and(|p| p.controls)
+        // A stream has no timeline for the bar.
+        self.props
+            .borrow()
+            .as_ref()
+            .is_some_and(|p| p.controls && p.stream.is_none())
     }
 
     fn resize_mode(&self) -> ResizeMode {
@@ -930,7 +1088,7 @@ fn make_frame(gfx: &gfx::Gfx, size: (u32, u32), generation: u64) -> Result<Frame
             }),
         )?;
         Ok(Frame {
-            texture,
+            texture: Some(texture),
             bitmap,
             size,
             generation,
