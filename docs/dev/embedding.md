@@ -67,8 +67,17 @@
   from any thread, the newest waits for one main-thread dispatch, and each video showing the name draws them in an
   `AVSampleBufferDisplayLayer` (`videoGravity` from `resize_mode`, `onLoad` from the first frame's size, `paused`
   keeps the last frame). A name is one entry whether registered or asked for first, so a video attached before the
-  registration draws once it comes. A backend that does not take streams yet (Android, Windows, Linux, GPUI) shows
-  nothing for one, as for a native component it has not registered.
+  registration draws once it comes. The Apple handles also take bytes (`push_bgra(width, height, stride, bytes)`,
+  copied into a `CVPixelBuffer`), which is the only form on Windows, Linux and GPUI: each backend's `stream.rs` is the
+  same registry over BGRA frames (`StreamHandle::push_bgra` from any thread, the newest waiting for one main-thread
+  hop: `UiThread::invoke`, `glib::MainContext::invoke`, `rt::invoke`), drawn by its video item (an `ID2D1Bitmap1`, a
+  `gdk::MemoryTexture` in a `gtk::Picture`, a `RenderImage`; `docs/dev/windows.md`, `linux.md`, `gpui.md`). Android
+  hands the host a `Surface` instead (`NshView.registerStream(name, producer)`, `NshStream.java`): the producer gets
+  the surface of the `TextureView` of the video showing the stream (`onSurface`, `onSurfaceGone`) and draws into it,
+  so one video shows a stream at a time (a second is logged once); `VideoProps::stream` crosses as the 12th field of
+  `NativeProps::Video` (`encode.rs` ↔ `Mounter.java`). Every development host registers `nsh/test-pattern`
+  (`nsh_dev::pattern`, Android's `DevActivity` with a `Canvas`), which `examples/gallery/tests/stream.test.tsx`
+  plays under `nsh test --target` on every platform.
 - **Native components** (`nsh`'s `nativeComponent`; `component.rs`, `ComponentBox.java`): the embedding app registers its own native
   views by name — Swift `NshAppView.register(component:) { context in … }` (`NshComponent`: `view`, `setProp`,
   `command`), Java `NshView.registerComponent(name, factory)` (`NshComponent`), Rust `AppView::register_component`

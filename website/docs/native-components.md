@@ -691,8 +691,40 @@ stream.end()
 On macOS, and from an app's own crate on both ([Registering from the app's crate](#registering-from-the-apps-crate)),
 the same in Rust: `app.register_stream("call.remote")` or `components.register_stream(..)` returns a `StreamHandle`,
 whose `push(frame)` takes a `CVPixelBufferRef` and whose `end()` ends the stream (dropping the handle does too).
-A name nothing registered shows nothing, logged once, as an unregistered component does; a video that names a stream
-before it is registered shows it once it is.
+
+On Windows, Linux and in a GPUI app the frames are bytes: `app.register_stream("call.remote")` (or
+`components.register_stream(..)`) returns the platform's `StreamHandle`, whose `push_bgra(width, height, stride,
+bytes)` takes a frame of BGRA pixels (8 bits each, `stride` bytes a row, copied) from any thread; the Apple handles
+take bytes the same way beside `CVPixelBuffer`s. The newest frame waits for one main-thread turn, so a slow main
+thread drops frames rather than queueing them.
+
+```rust
+let stream = app.register_stream("call.remote");   // StreamHandle
+// From the decoder's thread, for every frame:
+stream.push_bgra(1280, 720, 1280 * 4, &pixels);
+stream.end();
+```
+
+On Android the host draws instead: `registerStream` takes a producer, which gets the `Surface` of the video showing
+the stream and draws into it, as Camera2, MediaCodec, ExoPlayer or a WebRTC renderer draw into any surface:
+
+```java
+NshStream stream = view.registerStream("call.remote", new NshStream.Producer() {
+    @Override public void onSurface(Surface surface) { session.addTarget(surface); }   // the video is up: draw into it
+    @Override public void onSurfaceGone() { session.removeTarget(surface); }          // it went away: stop
+});
+stream.setSize(1280, 720);   // before the first frame: what onLoad reports; the surface's own size otherwise
+stream.end();
+```
+
+A surface belongs to one view, so on Android a stream shows in one video at a time: a second video naming it stays
+blank, logged once; and `paused` keeps the surface, which the producer goes on drawing. On every platform a name
+nothing registered shows nothing, logged once, as an unregistered component does; a video that names a stream before
+it is registered shows it once it is; `end()` blanks the videos until the name is registered again.
+
+Every development host (`nsh run`, `nsh test --target`) registers one stream, `nsh/test-pattern`, a 320×180 test
+pattern at 30 frames a second, so an app's tests can play a stream on every platform without a host of their own
+([Testing](./testing-and-trace.md)).
 
 ## Rules and limits
 

@@ -662,8 +662,37 @@ stream.end()
 
 macOS 上，以及两个平台上应用自己的 crate 里（[从应用的 crate 注册](#从应用的-crate-注册)），Rust 的写法相同：
 `app.register_stream("call.remote")` 或 `components.register_stream(..)` 返回一个 `StreamHandle`，它的 `push(frame)` 接受
-`CVPixelBufferRef`，`end()` 结束流（丢弃句柄也会结束）。没有注册的名字什么也不显示，日志记一次，和没有注册的组件一样；
-先引用名字、后注册的视频，在注册后开始显示。
+`CVPixelBufferRef`，`end()` 结束流（丢弃句柄也会结束）。
+
+Windows、Linux 和 GPUI 应用里，帧是字节：`app.register_stream("call.remote")`（或 `components.register_stream(..)`）返回该平台的
+`StreamHandle`，它的 `push_bgra(width, height, stride, bytes)` 接受一帧 BGRA 像素（每通道 8 位，每行 `stride` 字节，会被复制），
+任何线程都可以调用；Apple 的句柄在 `CVPixelBuffer` 之外也同样接受字节。最新的一帧等待一次主线程调度，所以主线程慢时丢帧而不是排队。
+
+```rust
+let stream = app.register_stream("call.remote");   // StreamHandle
+// 在解码线程上，每一帧：
+stream.push_bgra(1280, 720, 1280 * 4, &pixels);
+stream.end();
+```
+
+Android 上反过来由宿主画：`registerStream` 接受一个生产者，它拿到显示这个流的视频的 `Surface` 并往里画，就像 Camera2、MediaCodec、
+ExoPlayer 或 WebRTC 的渲染器往任何 surface 里画一样：
+
+```java
+NshStream stream = view.registerStream("call.remote", new NshStream.Producer() {
+    @Override public void onSurface(Surface surface) { session.addTarget(surface); }   // 视频就绪：往里画
+    @Override public void onSurfaceGone() { session.removeTarget(surface); }          // 视频没了：停下
+});
+stream.setSize(1280, 720);   // 第一帧之前设：onLoad 报告的尺寸；不设则是 surface 自己的尺寸
+stream.end();
+```
+
+一个 surface 只属于一个视图，所以 Android 上一个流同时只在一个视频里显示：第二个引用它的视频空白，日志记一次；`paused`
+保留 surface，生产者继续往里画。每个平台上，没有注册的名字什么也不显示，日志记一次，和没有注册的组件一样；先引用名字、后注册的视频，
+在注册后开始显示；`end()` 让视频空白，直到这个名字再次被注册。
+
+每个开发宿主（`nsh run`、`nsh test --target`）都注册一个流 `nsh/test-pattern`：320×180、每秒 30 帧的测试图案，应用的测试不用自己的宿主
+就能在每个平台上播放一个流（[测试](./testing-and-trace.md)）。
 
 ## 规则与限制
 
