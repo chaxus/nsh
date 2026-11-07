@@ -84,6 +84,7 @@ A video takes the props of a [view](./view.md) (it has no children) plus:
 | Prop | Rust | Type | Default | Description |
 |---|---|---|---|---|
 | `src` | `video(url)` | `string` | | The video's URL (in Rust, an asset's `uri` too: `video(CLIP.uri)`). |
+| `srcObject` | `.src_object(..)` | `MediaStream \| null` | `null` | A live stream played instead of `src`: see [Live streams](#live-streams). |
 | `paused` | `.paused(..)` | `boolean` | `false` | Playback is paused. |
 | `muted` | `.muted(..)` | `boolean` | `false` | No sound. |
 | `volume` | `.volume(..)` | `number` | `1` | 0..1. |
@@ -128,6 +129,28 @@ const ratio = signal(16 / 9);
 | Method | Rust | Description |
 |---|---|---|
 | `seek(seconds)` | `seek(seconds)` | Jumps to a time. |
+
+## Live streams
+
+`srcObject` plays a live stream instead of `src`, as the DOM's `HTMLMediaElement.srcObject` does: a call's video, a
+camera. The page that runs the app owns the stream and registers it by name; the app names it with
+`MediaStream.fromHost(name)` (Rust: `MediaStream::from_host(name)`). The stream plays in the browser and never passes
+through the app's code. While `srcObject` is set it wins over `src`; `null` plays `src` again. A live stream reports
+its size in `onLoad`, with a `duration` of 0, and `seek` leaves it as it is.
+
+```tsx
+import { MediaStream, Video } from "nsh";
+
+<Video srcObject={MediaStream.fromHost("remote")} style={{ height: 220 }} />;
+```
+
+The page registers a stream with `player.registerStream(name, stream)` (its `web.host` module can, with the player it
+gets); `null` takes it away. A name nothing registered shows nothing, as a [native
+component](../docs/native-components.md) nothing registered does, and the console says so once. A front camera's
+preview is mirrored with the view's own transform: `style={{ transform: [{ scaleX: -1 }] }}` (Rust: `.scale_x(-1.0)`).
+
+The web plays streams today; the native platforms show nothing for one until each takes streams from its embedding
+app, so an app checks `platform.os` before it relies on one.
 
 ## Capabilities
 

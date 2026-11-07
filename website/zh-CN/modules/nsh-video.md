@@ -20,7 +20,14 @@ import { Video, type VideoProps } from "nsh";
 const Video: (props: VideoProps) => JSX.Element;
 
 interface VideoProps extends Omit<ViewProps, "children">, VideoHostProps {
-  src: string;
+  src?: string;
+  srcObject?: MediaStream | null;
+}
+
+/** 嵌入应用按名字注册的实时流。 */
+class MediaStream {
+  static fromHost(name: string): MediaStream;
+  readonly name: string;
 }
 ```
 
@@ -61,7 +68,8 @@ mount(Player);
 
 | 属性 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `src` | `string` | （必填） | 视频的 URL。 |
+| `src` | `string` | | 视频的 URL。 |
+| `srcObject` | `MediaStream \| null` | `null` | 代替 `src` 播放的实时流（[实时流](../elements/video.md#实时流)）。 |
 | `paused` | `boolean` | `false` | 暂停播放。 |
 | `muted` | `boolean` | `false` | 静音。 |
 | `volume` | `number` | `1` | 0..1。 |

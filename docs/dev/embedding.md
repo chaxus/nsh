@@ -57,6 +57,11 @@
   the focus it is given (`Focusable`). The crate depends on `gpui-fast` 0.1 from crates.io (re-exported as
   `nsh_platform_gpui::gpui`); GPUI Kit's `gpui-fast` feature makes `gpui_component` use that same crate, so both share
   one GPUI. `open_app_window` opens a window showing an app in a running GPUI app.
+- **Live streams** (`<Video srcObject>`, `nsh`'s `MediaStream`): the embedding app registers a stream by name and
+  the app's video names it with `MediaStream.fromHost(name)`; the name crosses as `VideoProps::stream`
+  (`NativeProp::SrcObject`), the frames never pass through JS. The web page registers one with the player's
+  `registerStream(name, stream)` (`docs/dev/web.md` "Videos"); a native backend that does not take streams yet shows
+  nothing for one, as for a native component it has not registered.
 - **Native components** (`nsh`'s `nativeComponent`; `component.rs`, `ComponentBox.java`): the embedding app registers its own native
   views by name — Swift `NshAppView.register(component:) { context in … }` (`NshComponent`: `view`, `setProp`,
   `command`), Java `NshView.registerComponent(name, factory)` (`NshComponent`), Rust `AppView::register_component`

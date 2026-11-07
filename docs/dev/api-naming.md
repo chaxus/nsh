@@ -295,7 +295,8 @@ them yet (`compatibility.md`). The frozen RN-shaped modules keep their names. A 
 | `Image.getSize(source)`, `Image.prefetch(source)` | `(src: string \| ImageAsset)` | Addresses | |
 | `ImageAsset.uri` | `ImageAsset.url` | Addresses | What `import logo from "./logo.png"` gives |
 | **Video** | | | |
-| `source: string \| { uri }` | `src: string` | Addresses | |
+| `source: string \| { uri }` | `src?: string` | Addresses | Optional since `srcObject`: a stream alone plays |
+| (new) the DOM's `HTMLMediaElement.srcObject`, Flutter's `RTCVideoRenderer.srcObject`, react-native-webrtc's `RTCView streamURL` | `srcObject?: MediaStream \| null`, `MediaStream.fromHost(name)`; Rust `.src_object(..)`, `MediaStream::from_host(name)` | Where names come from | A live stream (a call's video, a camera) is a prop of `Video`, not a native component: the web has no native components (the browser hands the app the stream), and `objectFit`, `paused` / `muted`, `onLoad`'s size and `onError` are the video's already, so one view plays a file or a stream on every platform. The stream is a handle to what the embedding app registered by name, as native components are registered (`native-components.md`): a string could not own a stream (the web removed object URLs for them). A name nothing registered shows nothing, logged once, as an unregistered native component does; `mirror` is not a prop, the view's `transform` flips a preview |
 | **WebView** | | | |
 | `source: string \| { uri } \| { html, baseUrl }` | `src?: string`; `html?: string`, `baseUrl?: string` | Addresses | One of `src` and `html` |
 | the page's `window.ReactNativeWebView.postMessage(data)` | `window.nsh.postMessage(data)` | Where names come from | Decided by the user: only `window.nsh` is injected |

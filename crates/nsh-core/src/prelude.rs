@@ -97,6 +97,7 @@ pub use crate::element::{
     ListViewport,
     Listener,
     Measurement,
+    MediaStream,
     Method,
     Methods,
     Modal,

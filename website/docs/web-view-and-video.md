@@ -546,6 +546,19 @@ view()
 
 Video sources are network requests: with declared capabilities, the video's host must be allowed under `network` in `nsh.json`, as for `fetch` and remote images. A refused source shows nothing, and the refusal is logged once with the key to add.
 
+### Live streams
+
+A video plays a live stream instead of a file with `srcObject`, as the DOM's `HTMLMediaElement.srcObject`: a call's
+video, a camera. The embedding page registers the stream by name and the app names it with
+`MediaStream.fromHost(name)`; the frames stay with the page and never pass through the app's code. See [Live
+streams](../elements/video.md#live-streams).
+
+```tsx
+import { MediaStream, Video } from "nsh";
+
+<Video srcObject={MediaStream.fromHost("remote")} muted style={{ height: 220 }} />;
+```
+
 ## Related
 
 - [`WebView`](../elements/web-view.md) and [`Video`](../elements/video.md): the element references.
