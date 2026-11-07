@@ -705,6 +705,121 @@ final class Mounter {
     private final java.util.Set<String> missingComponents = new java.util.HashSet<>();
 
     /**
+     * The live streams the app registered ({@link NshView#registerStream})
+     * and the names videos asked for: one entry per name either way, so a
+     * video attached before the registration shows the stream once it comes.
+     */
+    private final java.util.Map<String, Stream> streams = new java.util.HashMap<>();
+    private final java.util.Set<String> missingStreams = new java.util.HashSet<>();
+    private final java.util.Set<String> busyStreams = new java.util.HashSet<>();
+
+    /**
+     * One stream by name: its registration, the video showing it and whether
+     * the producer holds that video's surface. A surface belongs to one
+     * {@code TextureView}, so one video shows a stream at a time.
+     */
+    static final class Stream {
+        final String name;
+        /** The current registration; null until one, and after `end()`. */
+        NshStream handle;
+        /** The video showing the stream. */
+        VideoBox video;
+        /** The frames' size (`NshStream.setSize`), 0 until set. */
+        int width, height;
+        private boolean handed;
+
+        Stream(String name) {
+            this.name = name;
+        }
+
+        /** Hands the video's surface to the producer, once per surface. */
+        void offer() {
+            if (handle == null || video == null || handed) return;
+            android.view.Surface surface = video.streamSurface();
+            if (surface == null) return;
+            handed = true;
+            handle.producer.onSurface(surface);
+        }
+
+        /** Takes the surface back: the producer stops drawing before the video releases it. */
+        void withdraw() {
+            if (!handed) return;
+            handed = false;
+            handle.producer.onSurfaceGone();
+        }
+    }
+
+    private Stream stream(String name) {
+        Stream s = streams.get(name);
+        if (s == null) {
+            s = new Stream(name);
+            streams.put(name, s);
+        }
+        return s;
+    }
+
+    /** `NshView.registerStream`: replaces an earlier registration of `name`. */
+    NshStream registerStream(String name, NshStream.Producer producer) {
+        Stream s = stream(name);
+        s.withdraw();
+        s.handle = new NshStream(this, s, producer);
+        s.width = 0;
+        s.height = 0;
+        missingStreams.remove(name);
+        if (s.video != null) s.video.streamRegistered();
+        return s.handle;
+    }
+
+    /** `NshStream.end`: nothing once another registration replaced `handle`. */
+    void endStream(NshStream handle) {
+        Stream s = handle.stream;
+        if (s.handle != handle) return;
+        s.withdraw();
+        s.handle = null;
+        s.width = 0;
+        s.height = 0;
+        if (s.video != null) s.video.streamEnded();
+    }
+
+    /** `NshStream.setSize`. */
+    void streamSize(NshStream handle, int width, int height) {
+        Stream s = handle.stream;
+        if (s.handle != handle) return;
+        s.width = width;
+        s.height = height;
+        if (s.video != null) s.video.streamSized();
+    }
+
+    /**
+     * Attaches `video` to stream `name`: it shows the frames once the name is
+     * registered (a name nothing registered is logged once). Null when
+     * another video shows the stream already (logged once): the video shows
+     * nothing.
+     */
+    Stream attachStream(String name, VideoBox video) {
+        Stream s = stream(name);
+        if (s.video != null && s.video != video) {
+            if (busyStreams.add(name)) {
+                android.util.Log.w("nsh", "stream `" + name + "` shows in a video already: a second video shows nothing");
+            }
+            return null;
+        }
+        if (s.handle == null && missingStreams.add(name)) {
+            android.util.Log.w("nsh", "no stream is registered as `" + name + "`: the video shows nothing");
+        }
+        s.video = video;
+        return s;
+    }
+
+    /** `video` stops showing stream `s`: the producer loses its surface. */
+    void detachStream(Stream s, VideoBox video) {
+        if (s.video != video) return;
+        s.withdraw();
+        s.video = null;
+        busyStreams.remove(s.name);
+    }
+
+    /**
      * The app stopped (the view was destroyed, or another app replaced it):
      * its native components hear {@link NshComponent#destroy} now, since no
      * {@code DELETE} follows for them. Those already deleted are not told
@@ -719,6 +834,8 @@ final class Mounter {
         for (int i = 0; i < views.size(); i++) {
             View v = views.valueAt(i);
             if (v instanceof ComponentBox) ((ComponentBox) v).destroy();
+            // Its streams' producers lose their surfaces now too.
+            if (v instanceof VideoBox) ((VideoBox) v).detachStream();
         }
     }
 
@@ -2356,9 +2473,10 @@ final class Mounter {
                 boolean controls = b.getInt() != 0;
                 float interval = b.getFloat();
                 int audioSession = b.getInt();
+                String stream = optString(b, objects);
                 if (v instanceof VideoBox) {
                     ((VideoBox) v).configure(source, paused, muted, volume, rate, repeat, mode, controls, interval,
-                            audioSession);
+                            audioSession, stream);
                 }
                 break;
             }

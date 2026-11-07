@@ -37,6 +37,8 @@ public final class DevActivity extends Activity {
         // An app on its own, not a module embedded in another app: no limits.
         view.useStandaloneLimits();
         setContentView(view);
+        // A live stream the tests play (`<Video srcObject={MediaStream.fromHost("nsh/test-pattern")}>`).
+        view.registerStream("nsh/test-pattern", new TestPattern()).setSize(TestPattern.WIDTH, TestPattern.HEIGHT);
         view.handleNotificationIntent(getIntent());
         // A recreated activity's intent was handed in already.
         if (state == null) view.handleUrlSchemeIntent(getIntent());
@@ -56,6 +58,66 @@ public final class DevActivity extends Activity {
         }
         String url = getIntent().getStringExtra("url");
         view.connectDevServer(url != null ? url : "ws://127.0.0.1:8790/ws");
+    }
+
+    /**
+     * The stream `nsh/test-pattern`: a hue sweeping through the colors behind
+     * a white bar moving right, drawn with a `Canvas` on a thread of its own
+     * at about 30 frames per second. The pattern is {@link #WIDTH} by
+     * {@link #HEIGHT} and scales to the canvas it gets.
+     */
+    static final class TestPattern implements NshStream.Producer {
+        static final int WIDTH = 320, HEIGHT = 180;
+        private static final int BAR = 16, STEP = 4, FRAME_MS = 33;
+        private final android.graphics.Paint bar = new android.graphics.Paint();
+        private android.os.HandlerThread thread;
+        private android.os.Handler handler;
+        private volatile android.view.Surface surface;
+        private int tick;
+
+        TestPattern() {
+            bar.setColor(android.graphics.Color.WHITE);
+        }
+
+        @Override
+        public void onSurface(android.view.Surface surface) {
+            this.surface = surface;
+            thread = new android.os.HandlerThread("nsh-test-pattern");
+            thread.start();
+            handler = new android.os.Handler(thread.getLooper());
+            handler.post(this::frame);
+        }
+
+        @Override
+        public void onSurfaceGone() {
+            // Not joined: `lockCanvas` blocks while the view is not drawn
+            // (hidden, detached), and the UI thread must not wait on it. A
+            // frame in progress ends on the released surface, which
+            // `frame` tolerates.
+            surface = null;
+            thread.quit();
+            thread = null;
+            handler = null;
+        }
+
+        private void frame() {
+            android.view.Surface s = surface;
+            android.os.Handler h = handler;
+            if (s == null || h == null) return;
+            try {
+                android.graphics.Canvas c = s.lockCanvas(null);
+                float sx = c.getWidth() / (float) WIDTH, sy = c.getHeight() / (float) HEIGHT;
+                c.drawColor(android.graphics.Color.HSVToColor(new float[] {tick % 360, 1, 1}));
+                float x = (tick * STEP % WIDTH) * sx;
+                c.drawRect(x, 0, x + BAR * sx, HEIGHT * sy, bar);
+                s.unlockCanvasAndPost(c);
+            } catch (IllegalArgumentException | android.view.Surface.OutOfResourcesException e) {
+                // The surface went (or has no buffer) between the check and
+                // the lock: the next frame finds `surface` cleared.
+            }
+            tick++;
+            h.postDelayed(this::frame, FRAME_MS);
+        }
     }
 
     private static void deleteTree(java.io.File file) {

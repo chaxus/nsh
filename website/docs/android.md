@@ -197,6 +197,7 @@ again replaces the running app. The complete sample is
 | `loadBundleFile(File file)` | Runs a `bundle.js` file; assets come from `assets/` next to it. Refuses `.nshc` files. |
 | `runPackage(NshPackage pkg)` | Runs a verified signed package, replacing the running app. A package runs once. |
 | `registerComponent(String name, NshComponent.Factory factory)` | Registers a [native component](./native-components.md). |
+| `registerStream(String name, NshStream.Producer producer)` | Registers a [live stream](#live-streams) for `<Video srcObject>`: the video showing it hands the producer a `Surface` to draw into. Returns the `NshStream`. |
 | `setParams(Object params)` | The launch parameters of the apps loaded next (a `Map` or `JSONObject`): the app reads them at start as `host.params` ([`host`](../modules/nsh.md#host)). Returns `false` when they are not a JSON object. |
 | `send(String name, Object data)` | Sends an event to the app (`host.on(name, …)`); kept until it listens, or for the next app while none runs. Any thread; returns `false` after `destroy()`. |
 | `handle(String name, HostHandler handler)` | Handles the app's calls (`host.call`) and posts (`host.post`) of `name` on the UI thread; `null` removes the handler. The handler answers through its `NshHostReply`, once, from any thread. |
@@ -217,6 +218,31 @@ Each app keeps its storage under its own id with no setting: a signed package un
 nsh.setStorageDirectory(new File(getFilesDir(), "nsh/com.example.orders"));
 nsh.loadAssetBundle("orders");
 ```
+
+## Live streams
+
+A video plays a live stream the host app registers, by name: `<Video srcObject={MediaStream.fromHost("call.remote")}>`
+([Live streams](../elements/video.md#live-streams)). On Android the frames go through a `Surface`, the currency of
+Camera2, `MediaCodec` and WebRTC: the video showing the stream hands its surface to the stream's
+`NshStream.Producer`, which draws into it from any thread until `onSurfaceGone`, and gets the next surface when
+the video has one again. The video's `objectFit` fits the frames at the size the `NshStream` declares, and its first
+frame is `onLoad` (`duration` 0).
+
+```java
+NshStream stream = nsh.registerStream("call.remote", new NshStream.Producer() {
+    @Override public void onSurface(Surface surface) { call.setRemoteSink(surface); }   // draw into it from now on
+    @Override public void onSurfaceGone() { call.setRemoteSink(null); }               // stop before returning
+});
+stream.setSize(1280, 720);   // the frames' size, before the first frame: the surface's buffers take it, `objectFit` fits it
+// When the call ends: the videos show nothing until the name is registered again.
+stream.end();
+```
+
+Register the stream before loading the app, as native components are; a video that names the stream before the
+registration shows it once it comes, and a name nothing registered shows nothing, logged once. A surface belongs to
+one `TextureView`, so a stream shows in one video at a time: a second video naming the same stream shows nothing
+(logged once); name the stream in it again once the first video stops showing it. The producer draws on its own
+clock, so `paused` leaves a stream playing; `muted`, `volume`, `rate` and `controls` do not apply to it.
 
 ## Talking to the app
 

@@ -463,6 +463,21 @@ public class NshView extends FrameLayout {
     }
 
     /**
+     * Registers live stream {@code name} ({@code MediaStream.fromHost(name)}
+     * in JS, a {@code Video}'s {@code srcObject}), replacing an earlier
+     * registration: the video naming it hands {@code producer} its surface
+     * to draw the frames into, now if one shows the name already, else once
+     * one does. UI thread.
+     *
+     * @param name the name JS uses
+     * @param producer draws the frames into the surface it is handed
+     * @return the stream: its size, and how to end it
+     */
+    public NshStream registerStream(String name, NshStream.Producer producer) {
+        return mounter.registerStream(name, producer);
+    }
+
+    /**
      * The launch parameters of the apps loaded from now on: what the app
      * reads synchronously at start as {@code host.params} ({@code nsh/host}),
      * such as the conversation a notification opens. A running app keeps the

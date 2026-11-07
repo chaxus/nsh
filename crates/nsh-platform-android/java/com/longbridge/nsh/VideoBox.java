@@ -17,7 +17,10 @@ import java.util.Objects;
 /**
  * `<video>`: a {@code MediaPlayer} drawing into a {@code TextureView} (which,
  * unlike a SurfaceView, transforms, clips and animates like any view).
- * `controls` attaches the platform's {@code MediaController}.
+ * `controls` attaches the platform's {@code MediaController}. A live stream
+ * (`srcObject`, {@link NshStream}) plays instead of the source: the stream's
+ * producer draws into the texture's surface, so `paused`, `muted`, `volume`,
+ * `rate` and `controls` do not apply to it.
  */
 @SuppressLint("ViewConstructor")
 final class VideoBox extends WidgetBox implements TextureView.SurfaceTextureListener,
@@ -27,6 +30,11 @@ final class VideoBox extends WidgetBox implements TextureView.SurfaceTextureList
     private MediaPlayer player;
     private Surface surface;
     private String source;
+    /** The live stream it shows (`srcObject`), and its entry while attached. */
+    private String stream;
+    private Mounter.Stream attached;
+    /** Whether the stream's first frame was reported (`onLoad`). */
+    private boolean streamLoaded;
     private boolean prepared;
     private boolean paused, muted, repeat;
     private float volume = 1, rate = 1;
@@ -50,7 +58,7 @@ final class VideoBox extends WidgetBox implements TextureView.SurfaceTextureList
     }
 
     void configure(String source, boolean paused, boolean muted, float volume, float rate, boolean repeat,
-            int resizeMode, boolean controls, float progressInterval, int audioSession) {
+            int resizeMode, boolean controls, float progressInterval, int audioSession, String stream) {
         this.paused = paused;
         this.muted = muted;
         this.volume = volume;
@@ -71,20 +79,112 @@ final class VideoBox extends WidgetBox implements TextureView.SurfaceTextureList
             this.resizeMode = resizeMode;
             fit();
         }
-        if (controls && controller == null) {
+        if (controls && stream == null && controller == null) {
             controller = new MediaController(getContext());
             controller.setMediaPlayer(this);
             controller.setAnchorView(this);
-        } else if (!controls && controller != null) {
+        } else if ((!controls || stream != null) && controller != null) {
             controller.hide();
             controller = null;
         }
-        if (!Objects.equals(source, this.source) || reopen) {
-            this.source = source;
+        boolean streamChanged = !Objects.equals(stream, this.stream);
+        boolean sourceChanged = !Objects.equals(source, this.source);
+        this.stream = stream;
+        this.source = source;
+        if (stream != null) {
+            // A live stream plays instead of the URL: the player goes.
+            if (streamChanged) {
+                detachStream();
+                release();
+                attachStream();
+            }
+        } else if (streamChanged || sourceChanged || reopen) {
+            detachStream();
             open();
         } else {
             apply();
         }
+    }
+
+    // --- Live streams (`srcObject`) --------------------------------------------
+
+    /** The texture's surface, for the stream's producer; null until the texture is available. */
+    Surface streamSurface() {
+        return surface;
+    }
+
+    private void attachStream() {
+        attached = mounter.attachStream(stream, this);
+        if (attached == null) return;
+        if (mounter.wants(id, Native.LOAD_START)) mounter.event(id, Native.LOAD_START);
+        streamSized();
+        attached.offer();
+    }
+
+    /** Stops showing the stream, if any: the producer loses the surface. */
+    void detachStream() {
+        if (attached == null) return;
+        mounter.detachStream(attached, this);
+        attached = null;
+        streamLoaded = false;
+        texture.setVisibility(VISIBLE);
+        videoWidth = 0;
+        videoHeight = 0;
+        // The buffers and the fit go back to the texture's own size (`fit`
+        // leaves the transform alone without a picture size).
+        SurfaceTexture st = texture.getSurfaceTexture();
+        if (st != null && texture.getWidth() > 0 && texture.getHeight() > 0) {
+            st.setDefaultBufferSize(texture.getWidth(), texture.getHeight());
+        }
+        texture.setTransform(null);
+    }
+
+    /** The stream's name was registered (again): the new producer draws. */
+    void streamRegistered() {
+        streamLoaded = false;
+        texture.setVisibility(VISIBLE);
+        streamSized();
+        attached.offer();
+    }
+
+    /**
+     * The stream ended: the texture hides, since its last frame stays in it
+     * until a producer draws again.
+     */
+    void streamEnded() {
+        streamLoaded = false;
+        texture.setVisibility(INVISIBLE);
+    }
+
+    /** The stream's size changed (`NshStream.setSize`): the buffers and the fit take it. */
+    void streamSized() {
+        if (attached == null) return;
+        videoWidth = attached.width;
+        videoHeight = attached.height;
+        streamBufferSize();
+        fit();
+    }
+
+    /**
+     * Sizes the texture's buffers to the stream's frames, so a `Canvas`
+     * locked on the surface is their size and the texture scales them by
+     * `fit`. The texture sets its buffers to its own size whenever it is
+     * resized, so this runs again after `onSurfaceTextureSizeChanged`.
+     */
+    private void streamBufferSize() {
+        SurfaceTexture st = texture.getSurfaceTexture();
+        if (st == null || attached == null || attached.width <= 0 || attached.height <= 0) return;
+        st.setDefaultBufferSize(attached.width, attached.height);
+    }
+
+    /** The stream's first frame reached the texture: `onLoad`, with no timeline. */
+    private void streamFrame() {
+        if (attached == null || streamLoaded) return;
+        streamLoaded = true;
+        int w = attached.width > 0 ? attached.width : texture.getWidth();
+        int h = attached.height > 0 ? attached.height : texture.getHeight();
+        mounter.eventMap(id, Native.LOAD, new String[] {"duration", "width", "height"},
+                new Object[] {0.0, (double) w, (double) h});
     }
 
     private void open() {
@@ -283,6 +383,7 @@ final class VideoBox extends WidgetBox implements TextureView.SurfaceTextureList
 
     void destroy() {
         if (controller != null) controller.hide();
+        detachStream();
         release();
         abandonFocus();
         if (surface != null) {
@@ -297,17 +398,22 @@ final class VideoBox extends WidgetBox implements TextureView.SurfaceTextureList
     public void onSurfaceTextureAvailable(SurfaceTexture st, int width, int height) {
         surface = new Surface(st);
         if (player != null) player.setSurface(surface);
+        streamBufferSize();
+        if (attached != null) attached.offer();
         fit();
     }
 
     @Override
     public void onSurfaceTextureSizeChanged(SurfaceTexture st, int width, int height) {
+        streamBufferSize();
         fit();
     }
 
     @Override
     public boolean onSurfaceTextureDestroyed(SurfaceTexture st) {
         if (player != null) player.setSurface(null);
+        // The producer stops drawing before the surface goes; it gets the next one.
+        if (attached != null) attached.withdraw();
         if (surface != null) {
             surface.release();
             surface = null;
@@ -316,7 +422,9 @@ final class VideoBox extends WidgetBox implements TextureView.SurfaceTextureList
     }
 
     @Override
-    public void onSurfaceTextureUpdated(SurfaceTexture st) {}
+    public void onSurfaceTextureUpdated(SurfaceTexture st) {
+        streamFrame();
+    }
 
     // --- MediaController.MediaPlayerControl ------------------------------------
     // The controller plays and pauses the player directly; JS learns about it
