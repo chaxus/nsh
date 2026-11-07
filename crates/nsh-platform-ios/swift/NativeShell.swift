@@ -481,6 +481,42 @@ public final class NshComponentContext: @unchecked Sendable {
     }
 }
 
+/// A live stream the app registered (`NshAppView.register(stream:)`): where
+/// it pushes the frames, from any thread. The videos whose `srcObject` is
+/// `MediaStream.fromHost(name)` show them. Dropping it ends the stream.
+public final class NshStream: @unchecked Sendable {
+    private let handle: OpaquePointer
+
+    fileprivate init(_ handle: OpaquePointer) {
+        self.handle = handle
+    }
+
+    deinit {
+        nsh_stream_free(handle)
+    }
+
+    /// Shows `frame` in the videos playing the stream. A frame that comes
+    /// before the previous one was drawn replaces it.
+    public func push(_ frame: CVPixelBuffer) {
+        nsh_stream_push(handle, frame)
+    }
+
+    /// Ends the stream: the videos playing it show nothing from now on,
+    /// until the name is registered again.
+    public func end() {
+        nsh_stream_end(handle)
+    }
+}
+
+extension NshAppView {
+    /// Registers live stream `name` (`MediaStream.fromHost(name)` in JS,
+    /// played by `<Video srcObject>`): push its frames (`CVPixelBuffer`s) to
+    /// what it returns. Applies to the videos naming it, now or later.
+    public func register(stream name: String) -> NshStream {
+        NshStream(nsh_app_register_stream(app, name)!)
+    }
+}
+
 /// Holds a registration's factory for the C callbacks.
 private final class ComponentFactoryBox {
     let make: @MainActor (NshComponentContext) -> NshComponent

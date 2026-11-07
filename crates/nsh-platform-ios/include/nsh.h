@@ -9,6 +9,7 @@
 #pragma once
 
 #import <UIKit/UIKit.h>
+#import <CoreVideo/CoreVideo.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -223,6 +224,25 @@ void nsh_component_set_size(const NshComponentContext *context, double width, do
 
 /// Frees a component's context.
 void nsh_component_context_free(NshComponentContext *_Nullable context);
+
+/// A live stream the app registered: where it pushes the frames.
+typedef struct NshStream NshStream;
+
+/// Registers live stream `name` (`MediaStream.fromHost(name)` in JS, played
+/// by `<Video srcObject>`) and returns where to push its frames; free it
+/// with `nsh_stream_free`, which ends the stream. Main thread.
+NshStream *_Nullable nsh_app_register_stream(NshApp *app, const char *name);
+
+/// Shows `frame` in the videos playing the stream (retained while nsh holds
+/// it). Any thread.
+void nsh_stream_push(const NshStream *stream, CVPixelBufferRef _Nullable frame);
+
+/// Ends the stream: the videos playing it show nothing from now on. Any
+/// thread.
+void nsh_stream_end(const NshStream *stream);
+
+/// Frees a stream's handle, ending the stream.
+void nsh_stream_free(NshStream *_Nullable stream);
 
 /// The launch parameters of the apps `app` loads from now on (`host.params`,
 /// read when an app starts): a JSON object, or NULL for none. Returns why

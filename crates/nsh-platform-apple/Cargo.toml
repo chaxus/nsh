@@ -1,6 +1,6 @@
 [package]
 name = "nsh-platform-apple"
-description = "Code shared by the macOS and iOS backends: the Speech recognizer and the notification center."
+description = "Code shared by the macOS and iOS backends: the Speech recognizer, the notification center and live streams."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
