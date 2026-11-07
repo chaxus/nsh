@@ -188,6 +188,16 @@ covers [props] repeat
 covers [props] controls
 covers [styles] objectFit
 covers [props] progressUpdateInterval
+# props-media-video-stream
+tap id:case-props-media-video-stream
+expect Live compat-camera, empty TypeError
+prop id:live src https://example.com/fallback.mp4
+# Cleared and set again, the app runs on.
+tap id:swap
+expect Stopped compat-camera, empty TypeError
+tap id:swap
+expect Live compat-camera, empty TypeError
+covers [nsh] MediaStream
 # props-media-webview
 tap id:case-props-media-webview
 expect HTML

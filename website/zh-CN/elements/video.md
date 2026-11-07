@@ -81,6 +81,7 @@ function Player() {
 | 属性 | Rust | 类型 | 默认值 | 说明 |
 |---|---|---|---|---|
 | `src` | `video(url)` | `string` | | 视频的 URL（在 Rust 中也可以是资源的 `uri`：`video(CLIP.uri)`）。 |
+| `srcObject` | `.src_object(..)` | `MediaStream \| null` | `null` | 代替 `src` 播放的实时流：见[实时流](#实时流)。 |
 | `paused` | `.paused(..)` | `boolean` | `false` | 暂停播放。 |
 | `muted` | `.muted(..)` | `boolean` | `false` | 静音。 |
 | `volume` | `.volume(..)` | `number` | `1` | 0..1。 |
@@ -124,6 +125,24 @@ const ratio = signal(16 / 9);
 | 方法 | Rust | 说明 |
 |---|---|---|
 | `seek(seconds)` | `seek(seconds)` | 跳转到某个时间点。 |
+
+## 实时流
+
+`srcObject` 代替 `src` 播放一个实时流，与 DOM 的 `HTMLMediaElement.srcObject` 相同：通话的视频、摄像头。流归运行应用的页面所有，由它按名字注册；
+应用用 `MediaStream.fromHost(name)`（Rust：`MediaStream::from_host(name)`）指定它。流在浏览器中播放，不经过应用的代码。
+设置了 `srcObject` 时它优先于 `src`；设为 `null` 时再播放 `src`。实时流在 `onLoad` 中报告尺寸，`duration` 为 0，`seek` 不改变它。
+
+```tsx
+import { MediaStream, Video } from "nsh";
+
+<Video srcObject={MediaStream.fromHost("remote")} style={{ height: 220 }} />;
+```
+
+页面用 `player.registerStream(name, stream)` 注册流（它的 `web.host` 模块可以用拿到的 player 注册），传 `null` 则取消注册。
+没有注册的名字什么也不显示，和没有注册的[原生组件](../docs/native-components.md)一样，控制台会提示一次。前置摄像头的预览用视图自己的
+变换做镜像：`style={{ transform: [{ scaleX: -1 }] }}`（Rust：`.scale_x(-1.0)`）。
+
+目前 Web 平台播放实时流；原生平台在各自接入嵌入应用的流之前，对实时流什么也不显示，所以应用在依赖它之前先看 `platform.os`。
 
 ## 能力声明
 

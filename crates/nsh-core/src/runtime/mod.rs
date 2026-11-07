@@ -24,6 +24,7 @@ mod fps;
 mod fs;
 mod host;
 mod image;
+mod media_stream;
 mod net;
 mod notifications;
 mod os;
@@ -64,6 +65,7 @@ pub fn registries() -> &'static [Registry] {
             .module::<speech::Speech>()
             .class::<audio::Sound>()
             .class::<audio::AudioPlayer>()
+            .class::<media_stream::MediaStream>()
             .module::<notifications::Notifications>()
             .module::<url_scheme::UrlScheme>()
             .module::<webview::WebView>()
@@ -97,6 +99,14 @@ pub fn registries() -> &'static [Registry] {
             nsh, desktop, mobile, os, net, process, fs, websocket, updater,
         ]
     })
+}
+
+/// The name of the `MediaStream` instance `instance` is
+/// ([`crate::js::host_values::src_object`]).
+pub(crate) fn media_stream_name(
+    instance: std::rc::Rc<dyn crate::element::ClassInstance>,
+) -> Option<std::sync::Arc<str>> {
+    media_stream::name_of(instance)
 }
 
 #[cfg(test)]

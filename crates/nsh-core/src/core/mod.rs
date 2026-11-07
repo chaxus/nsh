@@ -5120,6 +5120,23 @@ impl<M: TextEngine> Core<M> {
                     }
                     return Ok(());
                 }
+                // A stream's name is 1 to 256 bytes (Rust's
+                // `MediaStream::from_host` takes any): another plays nothing.
+                // A platform that does not play streams yet shows nothing
+                // for one, as it does for a native component it has not
+                // registered: the prop means the same everywhere.
+                let prop = match prop {
+                    NativeProp::SrcObject(Some(name)) => {
+                        match crate::element::MediaStream::checked(&name) {
+                            Ok(()) => NativeProp::SrcObject(Some(name)),
+                            Err(why) => {
+                                log::warn!(target: "js", "{why}");
+                                NativeProp::SrcObject(None)
+                            }
+                        }
+                    }
+                    prop => prop,
+                };
                 if let Some(control) = node.control.as_mut() {
                     apply_native(control, prop);
                     flags |= dirty::NATIVE;
@@ -9015,6 +9032,7 @@ fn apply_native(control: &mut NativeProps, prop: NativeProp) {
         (NativeProps::Video(p), P::Src(v)) => p.source = v,
         (NativeProps::Video(p), P::Paused(v)) => p.paused = v,
         (NativeProps::Video(p), P::Muted(v)) => p.muted = v,
+        (NativeProps::Video(p), P::SrcObject(v)) => p.stream = v,
         (NativeProps::Video(p), P::Volume(v)) => p.volume = v.clamp(0.0, 1.0),
         (NativeProps::Video(p), P::Rate(v)) => p.rate = v.max(0.0),
         (NativeProps::Video(p), P::Repeat(v)) => p.repeat = v,

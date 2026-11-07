@@ -662,6 +662,44 @@ pub fn video(url: impl IntoReactive<String>) -> Video {
     })
 }
 
+/// A live stream the embedding app registered by name (a call's video, a
+/// camera), which [`Video::src_object`] plays (TS: `MediaStream`,
+/// `MediaStream.fromHost(name)`). It holds only the name: the embedding
+/// app owns the stream.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct MediaStream {
+    name: Arc<str>,
+}
+
+impl MediaStream {
+    /// The stream the embedding app registered as `name`. A name nothing
+    /// registered shows nothing (logged once, as a native component's).
+    pub fn from_host(name: impl Into<Arc<str>>) -> Self {
+        Self { name: name.into() }
+    }
+
+    /// The name the embedding app registered the stream with.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn name_arc(&self) -> Arc<str> {
+        self.name.clone()
+    }
+
+    /// What a stream's name may be: 1 to 256 bytes.
+    pub(crate) fn checked(name: &str) -> Result<(), String> {
+        if name.is_empty() || name.len() > 256 {
+            return Err(format!(
+                "MediaStream.fromHost: a name has 1 to 256 bytes (this one has {})",
+                name.len()
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// The embedder's native component registered as `name`.
 pub fn native(name: &str) -> NativeView {
     NativeView(ElNode::new(Tag::Native)).set(Prop::Component(name.into()))
@@ -1526,6 +1564,14 @@ impl WebView {
 }
 
 impl Video {
+    /// Plays `stream`, a live stream the embedding app registered, instead
+    /// of the URL (TS: `srcObject`); `None` plays the URL again.
+    pub fn src_object(self, stream: impl IntoReactive<Option<MediaStream>>) -> Self {
+        self.bind_prop(stream, |stream: Option<MediaStream>| {
+            Prop::Native(NativeProp::SrcObject(stream.map(|s| s.name)))
+        })
+    }
+
     /// Paused.
     pub fn paused(self, paused: impl IntoReactive<bool>) -> Self {
         self.bind_prop(paused, |paused: bool| {

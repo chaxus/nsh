@@ -172,6 +172,7 @@ export function createBrowserHost(player) {
         dom.setPlatform(env.api.platform);
         const gestures = createGestures(call, values, reactive, dom, active, requestPump);
         dom.setTouches(gestures);
+        dom.setSrcObjects((id, stream) => player.setVideoSrcObject(id, stream));
         dom.rt.setup = env.setup;
         dom.rt.font = (uri, family) => call(404, [uri, family]);
         stopped.push(() => dom.dispose(), () => modules?.dispose(), () => host?.dispose(), () => animation?.dispose(), () => player.wasm.nsh_stop(), () => player.wasm.nsh_browser_dispose());

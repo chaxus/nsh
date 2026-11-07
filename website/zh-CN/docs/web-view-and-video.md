@@ -540,6 +540,17 @@ view()
 
 视频来源是网络请求：声明了能力时，视频所在的主机必须在 `nsh.json` 的 `network` 下得到允许，与 `fetch` 和远程图片相同。被拒绝的来源不显示任何内容，并且会记录一次日志，指出需要添加的键。
 
+### 实时流
+
+视频用 `srcObject` 代替文件播放实时流，与 DOM 的 `HTMLMediaElement.srcObject` 相同：通话的视频、摄像头。嵌入的页面按名字注册流，
+应用用 `MediaStream.fromHost(name)` 指定它；画面留在页面里，不经过应用的代码。见[实时流](../elements/video.md#实时流)。
+
+```tsx
+import { MediaStream, Video } from "nsh";
+
+<Video srcObject={MediaStream.fromHost("remote")} muted style={{ height: 220 }} />;
+```
+
 ## 相关内容
 
 - [`WebView`](../elements/web-view.md) 与 [`Video`](../elements/video.md)：元素参考。

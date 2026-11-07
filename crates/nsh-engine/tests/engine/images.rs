@@ -387,6 +387,51 @@ mount(() => (
     );
 }
 
+#[test]
+fn a_videos_media_stream_reaches_the_platform_by_name() {
+    use nsh_core::NativeProps;
+    const APP: &str = r#"import { mount, MediaStream, Text, Video, View, signal } from "nsh";
+
+const said = signal("");
+
+mount(() => (
+  <View>
+    <Video
+      src="https://example.com/a.mp4"
+      srcObject={MediaStream.fromHost("camera")}
+      onError={({ message }) => said.set(`${said()} ${message}`)}
+    />
+    <Text>{`said:${said()}`}</Text>
+  </View>
+));
+"#;
+    let (_engine, rx) = start(APP, 1.0);
+    let mut video = None;
+    let mut said = String::new();
+    for batch in sent(&rx) {
+        for item in batch.items {
+            match item {
+                MountItem::NativeProps {
+                    props: NativeProps::Video(v),
+                    ..
+                } => video = Some((v.source.clone(), v.stream.clone())),
+                MountItem::Text { text, .. } => said = text.text.to_string(),
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(
+        video,
+        Some((
+            Some("https://example.com/a.mp4".into()),
+            Some("camera".into())
+        ))
+    );
+    // A platform that plays no stream shows nothing for it and says nothing
+    // to the app, as for a native component it has not registered.
+    assert_eq!(said, "said:");
+}
+
 /// The image items of `batch` with their bytes: source URI and data.
 fn inline_images(batch: &MountBatch) -> Vec<(String, Option<Vec<u8>>)> {
     batch
