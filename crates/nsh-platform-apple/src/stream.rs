@@ -72,7 +72,22 @@ unsafe extern "C" {
 unsafe extern "C" {
     fn CVPixelBufferGetWidth(buffer: *const c_void) -> usize;
     fn CVPixelBufferGetHeight(buffer: *const c_void) -> usize;
+    fn CVPixelBufferCreate(
+        allocator: *const c_void,
+        width: usize,
+        height: usize,
+        format: u32,
+        attributes: *const c_void,
+        out: *mut *mut c_void,
+    ) -> i32;
+    fn CVPixelBufferLockBaseAddress(buffer: *mut c_void, flags: u64) -> i32;
+    fn CVPixelBufferUnlockBaseAddress(buffer: *mut c_void, flags: u64) -> i32;
+    fn CVPixelBufferGetBaseAddress(buffer: *mut c_void) -> *mut u8;
+    fn CVPixelBufferGetBytesPerRow(buffer: *mut c_void) -> usize;
 }
+
+/// `kCVPixelFormatType_32BGRA`.
+const BGRA: u32 = 0x4247_5241;
 
 #[link(name = "CoreMedia", kind = "framework")]
 unsafe extern "C" {
@@ -113,6 +128,41 @@ impl Frame {
         // SAFETY: a live CF object, as the caller guarantees.
         unsafe { CFRetain(buffer.as_ptr()) };
         Some(Frame(buffer))
+    }
+
+    /// A new BGRA buffer of `width` × `height` pixels holding `bytes`
+    /// (`stride` bytes a row), or `None` when CoreVideo refuses the size.
+    fn from_bgra(width: usize, height: usize, stride: usize, bytes: &[u8]) -> Option<Self> {
+        let mut buffer: *mut c_void = std::ptr::null_mut();
+        // SAFETY: CoreVideo's documented API; the buffer is locked while
+        // its rows are written, and comes retained (+1), which `Frame`
+        // releases.
+        unsafe {
+            if CVPixelBufferCreate(
+                std::ptr::null(),
+                width,
+                height,
+                BGRA,
+                std::ptr::null(),
+                &mut buffer,
+            ) != 0
+            {
+                return None;
+            }
+            let buffer = NonNull::new(buffer)?;
+            CVPixelBufferLockBaseAddress(buffer.as_ptr(), 0);
+            let base = CVPixelBufferGetBaseAddress(buffer.as_ptr());
+            let own = CVPixelBufferGetBytesPerRow(buffer.as_ptr());
+            for y in 0..height {
+                std::ptr::copy_nonoverlapping(
+                    bytes[y * stride..].as_ptr(),
+                    base.add(y * own),
+                    width * 4,
+                );
+            }
+            CVPixelBufferUnlockBaseAddress(buffer.as_ptr(), 0);
+            Some(Frame(buffer))
+        }
     }
 
     fn size(&self) -> (usize, usize) {
@@ -238,6 +288,8 @@ pub(crate) struct Shared {
     scheduled: AtomicBool,
     /// Whether a registration is live (frames may come).
     registered: AtomicBool,
+    /// A frame of bytes that did not fit its size was reported.
+    wrong_frame: AtomicBool,
     main: MainThreadBound<RefCell<Sinks>>,
 }
 
@@ -248,6 +300,7 @@ impl Shared {
             pending: Mutex::new(None),
             scheduled: AtomicBool::new(false),
             registered: AtomicBool::new(false),
+            wrong_frame: AtomicBool::new(false),
             main: MainThreadBound::new(RefCell::default(), mtm),
         })
     }
@@ -276,11 +329,17 @@ impl Shared {
         });
     }
 
-    /// Draws `frame` in every sink that is not paused.
+    /// Draws `frame` in every sink that is not paused; a paused sink that
+    /// has no frame yet draws this one, so a paused video shows the first
+    /// frame and reports its size, as a paused `<video>` does.
     fn draw(&self, mtm: MainThreadMarker, frame: &Frame) {
         let sinks = self.main.get(mtm).borrow();
         let mut sample = None;
-        for sink in sinks.sinks.iter().filter(|s| !s.paused.get()) {
+        for sink in sinks
+            .sinks
+            .iter()
+            .filter(|s| !s.paused.get() || !s.loaded.get())
+        {
             if sample.is_none() {
                 sample = frame.sample();
             }
@@ -351,6 +410,35 @@ impl StreamHandle {
     pub unsafe fn push(&self, frame: CVPixelBufferRef) {
         // SAFETY: guaranteed by the caller.
         if let Some(frame) = unsafe { Frame::retain(frame) } {
+            self.shared.push(frame);
+        }
+    }
+
+    /// Shows a frame given as bytes: `width` × `height` pixels of BGRA (8
+    /// bits each), `stride` bytes a row (at least `width * 4`), copied into
+    /// a `CVPixelBuffer`, as the other platforms' handles take frames. A
+    /// frame that comes before the previous one was drawn replaces it. A
+    /// size the bytes do not cover, or an empty one, is logged once and
+    /// shows nothing.
+    pub fn push_bgra(&self, width: usize, height: usize, stride: usize, bytes: &[u8]) {
+        let fits = width > 0
+            && height > 0
+            && width.checked_mul(4).is_some_and(|row| stride >= row)
+            && stride
+                .checked_mul(height)
+                .is_some_and(|all| bytes.len() >= all);
+        if !fits {
+            if !self.shared.wrong_frame.swap(true, Ordering::AcqRel) {
+                log::warn!(
+                    "stream `{}`: a frame of {width}×{height} pixels with {stride} bytes a row \
+                     does not fit {} bytes: shown nothing",
+                    self.shared.name,
+                    bytes.len()
+                );
+            }
+            return;
+        }
+        if let Some(frame) = Frame::from_bgra(width, height, stride, bytes) {
             self.shared.push(frame);
         }
     }
