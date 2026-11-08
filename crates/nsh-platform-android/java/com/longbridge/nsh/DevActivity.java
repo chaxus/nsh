@@ -111,9 +111,12 @@ public final class DevActivity extends Activity {
                 float x = (tick * STEP % WIDTH) * sx;
                 c.drawRect(x, 0, x + BAR * sx, HEIGHT * sy, bar);
                 s.unlockCanvasAndPost(c);
-            } catch (IllegalArgumentException | android.view.Surface.OutOfResourcesException e) {
+            } catch (IllegalArgumentException | IllegalStateException
+                    | android.view.Surface.OutOfResourcesException e) {
                 // The surface went (or has no buffer) between the check and
-                // the lock: the next frame finds `surface` cleared.
+                // the lock, or was released while the canvas was held
+                // (`IllegalStateException` from `unlockCanvasAndPost`): the
+                // next frame finds `surface` cleared.
             }
             tick++;
             h.postDelayed(this::frame, FRAME_MS);

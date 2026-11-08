@@ -1,10 +1,12 @@
 // A video playing the live stream every development host registers,
 // `nsh/test-pattern`: the first frame's size once it loads, a second video
-// of the same stream, and the stream set and cleared.
+// of the same stream (which takes the stream over on Android once the
+// first video stops showing it), and the stream set and cleared.
 import { MediaStream, mount, platform, signal, Text, Video, View } from "nsh";
 
 function App() {
   const live = signal(true);
+  const shown = signal(true);
   const first = signal("waiting");
   const second = signal("waiting");
   const stream = MediaStream.fromHost("nsh/test-pattern");
@@ -14,7 +16,7 @@ function App() {
       <Text>{`On ${platform.os}`}</Text>
       <Video
         testID="first"
-        srcObject={live() ? stream : null}
+        srcObject={live() && shown() ? stream : null}
         muted
         style={{ height: 120, backgroundColor: "#111827", objectFit: "contain" }}
         onLoad={({ size }) => first.set(`${size.width}×${size.height}`)}
@@ -31,6 +33,9 @@ function App() {
       <Text>{`Second ${second()}`}</Text>
       <View role="button" accessibilityLabel="Toggle" onPress={() => live.set(!live())} style={{ height: 40 }}>
         <Text>Toggle</Text>
+      </View>
+      <View role="button" accessibilityLabel="Remove first" onPress={() => shown.set(false)} style={{ height: 40 }}>
+        <Text>Remove first</Text>
       </View>
     </View>
   );

@@ -241,7 +241,7 @@ stream.end();
 Register the stream before loading the app, as native components are; a video that names the stream before the
 registration shows it once it comes, and a name nothing registered shows nothing, logged once. A surface belongs to
 one `TextureView`, so a stream shows in one video at a time: a second video naming the same stream shows nothing
-(logged once); name the stream in it again once the first video stops showing it. The producer draws on its own
+(logged once) until the first stops showing it, then takes it over. The producer draws on its own
 clock, so `paused` leaves a stream playing; `muted`, `volume`, `rate` and `controls` do not apply to it.
 
 ## Talking to the app

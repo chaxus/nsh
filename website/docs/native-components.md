@@ -718,7 +718,8 @@ stream.end();
 ```
 
 A surface belongs to one view, so on Android a stream shows in one video at a time: a second video naming it stays
-blank, logged once; and `paused` keeps the surface, which the producer goes on drawing. On every platform a name
+blank, logged once, until the first stops showing it, then takes it over; and `paused` keeps the surface, which the
+producer goes on drawing. On every platform a name
 nothing registered shows nothing, logged once, as an unregistered component does; a video that names a stream before
 it is registered shows it once it is; `end()` blanks the videos until the name is registered again.
 

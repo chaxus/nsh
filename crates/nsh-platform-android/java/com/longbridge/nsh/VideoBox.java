@@ -30,7 +30,10 @@ final class VideoBox extends WidgetBox implements TextureView.SurfaceTextureList
     private MediaPlayer player;
     private Surface surface;
     private String source;
-    /** The live stream it shows (`srcObject`), and its entry while attached. */
+    /**
+     * The live stream it names (`srcObject`), and its entry while attached:
+     * showing it ({@link #showing}), or waiting while another video does.
+     */
     private String stream;
     private Mounter.Stream attached;
     /** Whether the stream's first frame was reported (`onLoad`). */
@@ -113,15 +116,25 @@ final class VideoBox extends WidgetBox implements TextureView.SurfaceTextureList
         return surface;
     }
 
+    /** Whether this video shows its stream (not waiting for another to stop). */
+    private boolean showing() {
+        return attached != null && attached.video == this;
+    }
+
     private void attachStream() {
         attached = mounter.attachStream(stream, this);
-        if (attached == null) return;
+        if (!showing()) return;
         if (mounter.wants(id, Native.LOAD_START)) mounter.event(id, Native.LOAD_START);
         streamSized();
         attached.offer();
     }
 
-    /** Stops showing the stream, if any: the producer loses the surface. */
+    /** The video showing the stream it waits for stopped: it shows it now. */
+    void streamTakeOver() {
+        attachStream();
+    }
+
+    /** Stops showing (or waiting for) the stream, if any: the producer loses the surface. */
     void detachStream() {
         if (attached == null) return;
         mounter.detachStream(attached, this);
@@ -158,7 +171,7 @@ final class VideoBox extends WidgetBox implements TextureView.SurfaceTextureList
 
     /** The stream's size changed (`NshStream.setSize`): the buffers and the fit take it. */
     void streamSized() {
-        if (attached == null) return;
+        if (!showing()) return;
         videoWidth = attached.width;
         videoHeight = attached.height;
         streamBufferSize();
@@ -173,13 +186,13 @@ final class VideoBox extends WidgetBox implements TextureView.SurfaceTextureList
      */
     private void streamBufferSize() {
         SurfaceTexture st = texture.getSurfaceTexture();
-        if (st == null || attached == null || attached.width <= 0 || attached.height <= 0) return;
+        if (st == null || !showing() || attached.width <= 0 || attached.height <= 0) return;
         st.setDefaultBufferSize(attached.width, attached.height);
     }
 
     /** The stream's first frame reached the texture: `onLoad`, with no timeline. */
     private void streamFrame() {
-        if (attached == null || streamLoaded) return;
+        if (!showing() || streamLoaded) return;
         streamLoaded = true;
         int w = attached.width > 0 ? attached.width : texture.getWidth();
         int h = attached.height > 0 ? attached.height : texture.getHeight();
@@ -399,7 +412,7 @@ final class VideoBox extends WidgetBox implements TextureView.SurfaceTextureList
         surface = new Surface(st);
         if (player != null) player.setSurface(surface);
         streamBufferSize();
-        if (attached != null) attached.offer();
+        if (showing()) attached.offer();
         fit();
     }
 
@@ -413,7 +426,7 @@ final class VideoBox extends WidgetBox implements TextureView.SurfaceTextureList
     public boolean onSurfaceTextureDestroyed(SurfaceTexture st) {
         if (player != null) player.setSurface(null);
         // The producer stops drawing before the surface goes; it gets the next one.
-        if (attached != null) attached.withdraw();
+        if (showing()) attached.withdraw();
         if (surface != null) {
             surface.release();
             surface = null;

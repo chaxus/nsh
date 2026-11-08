@@ -27,8 +27,15 @@ test("the development host's test pattern plays in a video", async () => {
     return;
   }
   await app.waitFor("First 320×180");
-  // On Android a stream draws in one video at a time: the second stays blank.
-  if (!app.shows("On android")) await app.waitFor("Second 320×180");
+  // On Android a stream draws in one video at a time: the second waits
+  // for the first, and takes the stream over once the first stops showing it.
+  if (app.shows("On android")) {
+    expect(app.shows("Second waiting")).toBe(true);
+  } else {
+    await app.waitFor("Second 320×180");
+  }
+  await app.press("label:Remove first");
+  await app.waitFor("Second 320×180");
   await app.press("label:Toggle");
   await app.waitFor("Stream nsh/test-pattern cleared");
   await app.press("label:Toggle");

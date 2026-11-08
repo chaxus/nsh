@@ -716,7 +716,8 @@ final class Mounter {
     /**
      * One stream by name: its registration, the video showing it and whether
      * the producer holds that video's surface. A surface belongs to one
-     * {@code TextureView}, so one video shows a stream at a time.
+     * {@code TextureView}, so one video shows a stream at a time; the others
+     * naming it wait, and the first of them takes over when it stops.
      */
     static final class Stream {
         final String name;
@@ -724,6 +725,8 @@ final class Mounter {
         NshStream handle;
         /** The video showing the stream. */
         VideoBox video;
+        /** The videos naming the stream while another shows it, in order. */
+        final java.util.List<VideoBox> waiting = new java.util.ArrayList<>();
         /** The frames' size (`NshStream.setSize`), 0 until set. */
         int width, height;
         private boolean handed;
@@ -791,18 +794,20 @@ final class Mounter {
     }
 
     /**
-     * Attaches `video` to stream `name`: it shows the frames once the name is
-     * registered (a name nothing registered is logged once). Null when
-     * another video shows the stream already (logged once): the video shows
-     * nothing.
+     * Attaches `video` to stream `name`: the entry, whose `video` is this one
+     * when it shows the frames (once the name is registered; a name nothing
+     * registered is logged once), or another video that shows the stream
+     * already (logged once): then this one waits in line and takes over when
+     * that one stops showing it.
      */
     Stream attachStream(String name, VideoBox video) {
         Stream s = stream(name);
         if (s.video != null && s.video != video) {
             if (busyStreams.add(name)) {
-                android.util.Log.w("nsh", "stream `" + name + "` shows in a video already: a second video shows nothing");
+                android.util.Log.w("nsh", "stream `" + name + "` shows in a video already: a second video shows nothing until the first stops");
             }
-            return null;
+            if (!s.waiting.contains(video)) s.waiting.add(video);
+            return s;
         }
         if (s.handle == null && missingStreams.add(name)) {
             android.util.Log.w("nsh", "no stream is registered as `" + name + "`: the video shows nothing");
@@ -811,13 +816,24 @@ final class Mounter {
         return s;
     }
 
-    /** `video` stops showing stream `s`: the producer loses its surface. */
+    /**
+     * `video` stops showing stream `s` (the producer loses its surface, and
+     * the first video waiting for the stream takes it over, unless the app is
+     * stopping) or stops waiting for it.
+     */
     void detachStream(Stream s, VideoBox video) {
-        if (s.video != video) return;
+        if (s.video != video) {
+            s.waiting.remove(video);
+            return;
+        }
         s.withdraw();
         s.video = null;
         busyStreams.remove(s.name);
+        if (!destroying && !s.waiting.isEmpty()) s.waiting.remove(0).streamTakeOver();
     }
+
+    /** The app is stopping: videos detach from their streams, none takes over. */
+    private boolean destroying;
 
     /**
      * The app stopped (the view was destroyed, or another app replaced it):
@@ -831,12 +847,14 @@ final class Mounter {
             audio.release();
             audio = null;
         }
+        destroying = true;
         for (int i = 0; i < views.size(); i++) {
             View v = views.valueAt(i);
             if (v instanceof ComponentBox) ((ComponentBox) v).destroy();
             // Its streams' producers lose their surfaces now too.
             if (v instanceof VideoBox) ((VideoBox) v).detachStream();
         }
+        destroying = false;
     }
 
     /** The app's sounds and players (one per engine), made at its first audio command. UI thread. */
