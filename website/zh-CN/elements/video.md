@@ -143,7 +143,7 @@ import { MediaStream, Video } from "nsh";
 变换做镜像：`style={{ transform: [{ scaleX: -1 }] }}`（Rust：`.scale_x(-1.0)`）。
 
 每个平台都播放实时流：Web 页面注册流，iOS、macOS、Android、Windows、Linux 和 GPUI 应用里由嵌入应用注册并交出帧
-（[实时流](../docs/native-components.md#实时流)）。Android 上一个流同时只在一个视频里显示（宿主往视频的 surface 里画），
+（[实时流](../docs/native-components.md#实时流)）。Android 上宿主也可以直接往视频的 surface 里画：这样的流同时只在一个视频里显示，
 `paused` 保留 surface，宿主继续往里画。
 
 ## 能力声明

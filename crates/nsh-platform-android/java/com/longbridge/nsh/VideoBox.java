@@ -18,9 +18,10 @@ import java.util.Objects;
  * `<video>`: a {@code MediaPlayer} drawing into a {@code TextureView} (which,
  * unlike a SurfaceView, transforms, clips and animates like any view).
  * `controls` attaches the platform's {@code MediaController}. A live stream
- * (`srcObject`, {@link NshStream}) plays instead of the source: the stream's
- * producer draws into the texture's surface, so `paused`, `muted`, `volume`,
- * `rate` and `controls` do not apply to it.
+ * (`srcObject`, {@link NshStream}) plays instead of the source: its frames
+ * are drawn into the texture (`paused` keeps the last one), or its producer
+ * draws into the texture's surface on its own clock (`paused` does
+ * nothing); `muted`, `volume`, `rate` and `controls` do not apply to it.
  */
 @SuppressLint("ViewConstructor")
 final class VideoBox extends WidgetBox implements TextureView.SurfaceTextureListener,
@@ -116,22 +117,49 @@ final class VideoBox extends WidgetBox implements TextureView.SurfaceTextureList
         return surface;
     }
 
-    /** Whether this video shows its stream (not waiting for another to stop). */
+    /**
+     * Whether this video shows its stream: every video shows a stream that
+     * takes frames; a producer's stream shows in the first video naming it,
+     * the others wait for it to stop.
+     */
     private boolean showing() {
-        return attached != null && attached.video == this;
+        return attached != null && (attached.video == this || attached.takesFrames());
     }
 
     private void attachStream() {
+        boolean first = attached == null;
         attached = mounter.attachStream(stream, this);
+        if (first && mounter.wants(id, Native.LOAD_START)) mounter.event(id, Native.LOAD_START);
         if (!showing()) return;
-        if (mounter.wants(id, Native.LOAD_START)) mounter.event(id, Native.LOAD_START);
         streamSized();
         attached.offer();
     }
 
-    /** The video showing the stream it waits for stopped: it shows it now. */
+    /** The video showing the producer's stream it waits for stopped: it shows it now. */
     void streamTakeOver() {
         attachStream();
+    }
+
+    /** Whether a frame pushed now should draw: `paused` keeps the last one, but a video with none yet draws the first. */
+    private boolean streamWants() {
+        return !paused || !streamLoaded;
+    }
+
+    /**
+     * Draws a pushed frame into the texture (UI thread): the buffers are
+     * the frame's size (`streamSized`), so the canvas is too, and `fit`
+     * places it. The texture then reports the update (`onSurfaceTextureUpdated`:
+     * the first frame is `onLoad`).
+     */
+    void streamDraw(android.graphics.Bitmap frame) {
+        if (!showing() || !streamWants() || texture.getSurfaceTexture() == null) return;
+        android.graphics.Canvas c = texture.lockCanvas();
+        if (c == null) return;
+        try {
+            c.drawBitmap(frame, 0, 0, null);
+        } finally {
+            texture.unlockCanvasAndPost(c);
+        }
     }
 
     /** Stops showing (or waiting for) the stream, if any: the producer loses the surface. */
@@ -152,24 +180,25 @@ final class VideoBox extends WidgetBox implements TextureView.SurfaceTextureList
         texture.setTransform(null);
     }
 
-    /** The stream's name was registered (again): the new producer draws. */
+    /** The stream's name was registered (again): the new registration's frames draw. */
     void streamRegistered() {
         streamLoaded = false;
         texture.setVisibility(VISIBLE);
+        if (!showing()) return;
         streamSized();
         attached.offer();
     }
 
     /**
      * The stream ended: the texture hides, since its last frame stays in it
-     * until a producer draws again.
+     * until the stream draws again.
      */
     void streamEnded() {
         streamLoaded = false;
         texture.setVisibility(INVISIBLE);
     }
 
-    /** The stream's size changed (`NshStream.setSize`): the buffers and the fit take it. */
+    /** The stream's size changed (`NshStream.setSize`, or a frame of another size): the buffers and the fit take it. */
     void streamSized() {
         if (!showing()) return;
         videoWidth = attached.width;

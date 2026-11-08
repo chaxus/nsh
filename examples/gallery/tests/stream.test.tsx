@@ -27,15 +27,14 @@ test("the development host's test pattern plays in a video", async () => {
     return;
   }
   await app.waitFor("First 320×180");
-  // On Android a stream draws in one video at a time: the second waits
-  // for the first, and takes the stream over once the first stops showing it.
-  if (app.shows("On android")) {
-    expect(app.shows("Second waiting")).toBe(true);
-  } else {
-    await app.waitFor("Second 320×180");
-  }
-  await app.press("label:Remove first");
+  // The second video, paused, shows the stream's first frame on every
+  // platform (the hosts push frames; only a producer's stream on Android
+  // shows in one video at a time); it goes on alone once the first stops.
   await app.waitFor("Second 320×180");
+  // The Android host also registers the pattern as a producer drawing into
+  // the video's surface; elsewhere that name is unregistered and shows nothing.
+  if (app.shows("On android")) await app.waitFor("Surface 320×180");
+  await app.press("label:Remove first");
   await app.press("label:Toggle");
   await app.waitFor("Stream nsh/test-pattern cleared");
   await app.press("label:Toggle");

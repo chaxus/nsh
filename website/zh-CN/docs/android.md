@@ -187,7 +187,8 @@ setContentView(column);
 | `loadBundleFile(File file)` | 运行一个 `bundle.js` 文件；资源取自同目录下的 `assets/`。拒绝 `.nshc` 文件。 |
 | `runPackage(NshPackage pkg)` | 运行一个已验证的签名包，替换正在运行的应用。一个包只能运行一次。 |
 | `registerComponent(String name, NshComponent.Factory factory)` | 注册一个[原生组件](./native-components.md)。 |
-| `registerStream(String name, NshStream.Producer producer)` | 为 `<Video srcObject>` 注册一路[实时流](#实时流)：显示它的视频把一个 `Surface` 交给 producer 绘制。返回 `NshStream`。 |
+| `registerStream(String name)` | 为 `<Video srcObject>` 注册一路[实时流](#实时流)：把 BGRA 帧推给返回的 `NshStream`，任意线程。 |
+| `registerStream(String name, NshStream.Producer producer)` | 注册一路由 producer 绘制的[实时流](#实时流)：显示它的视频把一个 `Surface` 交给 producer 绘制。返回 `NshStream`。 |
 | `setParams(Object params)` | 之后加载的应用的启动参数（`Map` 或 `JSONObject`）：应用在启动时以 `host.params` 读取（[`host`](../modules/nsh.md#host)）。不是 JSON 对象时返回 `false`。 |
 | `send(String name, Object data)` | 向应用发送一个事件（`host.on(name, …)`）；应用开始监听前会一直保留，没有应用运行时留给下一个应用。可在任意线程调用；`destroy()` 后返回 `false`。 |
 | `handle(String name, HostHandler handler)` | 在 UI 线程处理应用对 `name` 的调用（`host.call`）和投递（`host.post`）；传 `null` 移除处理函数。处理函数通过它的 `NshHostReply` 在任意线程回答一次。 |
@@ -211,24 +212,34 @@ nsh.loadAssetBundle("orders");
 ## 实时流
 
 视频可以按名称播放宿主应用注册的实时流：`<Video srcObject={MediaStream.fromHost("call.remote")}>`
-（[实时流](../elements/video.md#实时流)）。在 Android 上帧通过 `Surface` 传递，这也是 Camera2、`MediaCodec` 和 WebRTC
-通用的载体：显示这路流的视频把自己的 surface 交给流的 `NshStream.Producer`，producer 在任意线程往里绘制，直到
-`onSurfaceGone`；视频再次拥有 surface 时会交出新的那一个。视频的 `objectFit` 按 `NshStream` 声明的尺寸适配帧，第一帧触发
-`onLoad`（`duration` 为 0）。
+（[实时流](../elements/video.md#实时流)）。宿主在任意线程把帧以 BGRA 字节推过来，和其它平台的 SDK 一样：每个引用这路流的视频都绘制每一帧，按自己的
+`objectFit` 适配，第一帧触发 `onLoad`（`duration` 为 0），`paused` 保留最后一帧。
+
+```java
+NshStream stream = nsh.registerStream("call.remote");
+// 在解码线程上，每一帧：width × height 个 BGRA 像素，每行 `stride` 字节（会被复制）。
+stream.pushBgra(pixels, 1280, 720, 1280 * 4);
+// 通话结束时：视频不再显示任何内容，直到这个名称再次注册。
+stream.end();
+```
+
+自己往 `Surface` 里渲染的来源（Camera2、`MediaCodec`、ExoPlayer、WebRTC 的渲染器）改为注册一个 producer，直接往视频的 surface 里画，不经过复制：
+显示这路流的视频把自己的 surface 交给 `NshStream.Producer`，producer 往里绘制直到 `onSurfaceGone`；视频再次拥有 surface 时会交出新的那一个。
+`setSize` 声明帧的尺寸，surface 的缓冲区按它分配，`objectFit` 按它适配。
 
 ```java
 NshStream stream = nsh.registerStream("call.remote", new NshStream.Producer() {
     @Override public void onSurface(Surface surface) { call.setRemoteSink(surface); }   // 从现在起往里绘制
     @Override public void onSurfaceGone() { call.setRemoteSink(null); }               // 返回前停止绘制
 });
-stream.setSize(1280, 720);   // 帧的尺寸，在第一帧之前设：surface 的缓冲区按它分配，`objectFit` 按它适配
-// 通话结束时：视频不再显示任何内容，直到这个名称再次注册。
-stream.end();
+stream.setSize(1280, 720);   // 在第一帧之前设：surface 的缓冲区按它分配，`objectFit` 按它适配
 ```
 
-像原生组件一样，在加载应用之前注册流；在注册之前就引用了这路流的视频，会在流注册后开始显示；没有任何注册的名称不显示内容，并记录一次日志。一个
-surface 只属于一个 `TextureView`，所以一路流同一时间只在一个视频中显示：第二个引用同一路流的视频不显示内容（记录一次日志），第一个视频不再显示它之后，第二个自动接过来显示。producer
-按自己的节奏绘制，所以 `paused` 不会停下实时流；`muted`、`volume`、`rate` 和 `controls` 对它不生效。
+一个 surface 只属于一个 `TextureView`，所以 producer 的流同一时间只在一个视频中显示：第二个引用它的视频不显示内容（记录一次日志），第一个不再显示它之后由第二个接过来；producer
+按自己的节奏绘制，所以 `paused` 不会停下它。推帧的流没有这两个限制。
+
+像原生组件一样，在加载应用之前注册流；在注册之前就引用了这路流的视频，会在流注册后开始显示；没有任何注册的名称不显示内容，并记录一次日志。`muted`、`volume`、`rate`
+和 `controls` 对实时流不生效。
 
 ## 与应用通信
 

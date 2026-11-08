@@ -1,7 +1,8 @@
 // A video playing the live stream every development host registers,
 // `nsh/test-pattern`: the first frame's size once it loads, a second video
-// of the same stream (which takes the stream over on Android once the
-// first video stops showing it), and the stream set and cleared.
+// of the same stream that goes on alone once the first stops showing it,
+// a video of `nsh/test-pattern-surface` (the Android host's producer form,
+// registered nowhere else), and the stream set and cleared.
 import { MediaStream, mount, platform, signal, Text, Video, View } from "nsh";
 
 function App() {
@@ -9,6 +10,7 @@ function App() {
   const shown = signal(true);
   const first = signal("waiting");
   const second = signal("waiting");
+  const surface = signal("waiting");
   const stream = MediaStream.fromHost("nsh/test-pattern");
   return (
     <View style={{ flex: 1, padding: 16, gap: 12 }}>
@@ -31,6 +33,14 @@ function App() {
         onLoad={({ size }) => second.set(`${size.width}×${size.height}`)}
       />
       <Text>{`Second ${second()}`}</Text>
+      <Video
+        testID="surface"
+        srcObject={live() ? MediaStream.fromHost("nsh/test-pattern-surface") : null}
+        muted
+        style={{ height: 60, backgroundColor: "#111827" }}
+        onLoad={({ size }) => surface.set(`${size.width}×${size.height}`)}
+      />
+      <Text>{`Surface ${surface()}`}</Text>
       <View role="button" accessibilityLabel="Toggle" onPress={() => live.set(!live())} style={{ height: 40 }}>
         <Text>Toggle</Text>
       </View>

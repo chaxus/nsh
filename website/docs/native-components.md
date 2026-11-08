@@ -705,21 +705,24 @@ stream.push_bgra(1280, 720, 1280 * 4, &pixels);
 stream.end();
 ```
 
-On Android the host draws instead: `registerStream` takes a producer, which gets the `Surface` of the video showing
-the stream and draws into it, as Camera2, MediaCodec, ExoPlayer or a WebRTC renderer draw into any surface:
+On Android the same, from any thread (`NshView.registerStream(name)`, `NshStream.pushBgra`); a source that renders
+into a `Surface` of its own accord (Camera2, MediaCodec, ExoPlayer, a WebRTC renderer) registers a producer instead,
+which gets the `Surface` of the video showing the stream and draws into it, with no copy:
 
 ```java
-NshStream stream = view.registerStream("call.remote", new NshStream.Producer() {
+NshStream stream = view.registerStream("call.remote");
+stream.pushBgra(pixels, 1280, 720, 1280 * 4);   // from the decoder's thread
+
+NshStream direct = view.registerStream("call.camera", new NshStream.Producer() {
     @Override public void onSurface(Surface surface) { session.addTarget(surface); }   // the video is up: draw into it
     @Override public void onSurfaceGone() { session.removeTarget(surface); }          // it went away: stop
 });
-stream.setSize(1280, 720);   // before the first frame: what onLoad reports; the surface's own size otherwise
-stream.end();
+direct.setSize(1280, 720);   // before the first frame: what onLoad reports; the surface's own size otherwise
 ```
 
-A surface belongs to one view, so on Android a stream shows in one video at a time: a second video naming it stays
+A surface belongs to one view, so a producer's stream shows in one video at a time: a second video naming it stays
 blank, logged once, until the first stops showing it, then takes it over; and `paused` keeps the surface, which the
-producer goes on drawing. On every platform a name
+producer goes on drawing. Pushed frames have neither limit, on Android as everywhere. On every platform a name
 nothing registered shows nothing, logged once, as an unregistered component does; a video that names a stream before
 it is registered shows it once it is; `end()` blanks the videos until the name is registered again.
 

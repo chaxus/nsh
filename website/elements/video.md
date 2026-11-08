@@ -151,8 +151,8 @@ preview is mirrored with the view's own transform: `style={{ transform: [{ scale
 
 Every platform plays streams: the web page registers one, and on iOS, macOS, Android, Windows, Linux and in GPUI
 apps the embedding app registers one and hands over its frames ([Live streams](../docs/native-components.md#live-streams)).
-On Android a stream shows in one video at a time (the host draws into the video's surface), and `paused` keeps the
-surface the host goes on drawing.
+On Android a host may also draw into the video's surface directly: such a stream shows in one video at a time, and
+`paused` keeps the surface the host goes on drawing.
 
 ## Capabilities
 

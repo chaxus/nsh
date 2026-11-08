@@ -714,30 +714,62 @@ final class Mounter {
     private final java.util.Set<String> busyStreams = new java.util.HashSet<>();
 
     /**
-     * One stream by name: its registration, the video showing it and whether
-     * the producer holds that video's surface. A surface belongs to one
-     * {@code TextureView}, so one video shows a stream at a time; the others
-     * naming it wait, and the first of them takes over when it stops.
+     * One stream by name: its registration and the videos naming it. A
+     * stream that takes frames ({@link NshStream#pushBgra}) draws each in
+     * every one of them; a producer's stream hands the first video's surface
+     * to the producer (a surface belongs to one {@code TextureView}), the
+     * others wait, and the first of them takes over when it stops.
      */
     static final class Stream {
         final String name;
-        /** The current registration; null until one, and after `end()`. */
-        NshStream handle;
-        /** The video showing the stream. */
+        /** The current registration; null until one, and after `end()` (read off the UI thread by `pushBgra`). */
+        volatile NshStream handle;
+        /** The first video naming the stream: the producer's surface is its. */
         VideoBox video;
-        /** The videos naming the stream while another shows it, in order. */
+        /** The other videos naming the stream, in order. */
         final java.util.List<VideoBox> waiting = new java.util.ArrayList<>();
-        /** The frames' size (`NshStream.setSize`), 0 until set. */
+        /** The frames' size (`NshStream.setSize`, or the frames pushed), 0 until known. */
         int width, height;
         private boolean handed;
+
+        /**
+         * The frames pushed, any thread: the newest waits in `pending` for
+         * the UI thread, which draws it and returns it to `free`; three
+         * bitmaps at most (one pending, one drawn, one filled).
+         */
+        private final Object lock = new Object();
+        private android.graphics.Bitmap pending;
+        private final java.util.ArrayDeque<android.graphics.Bitmap> free = new java.util.ArrayDeque<>();
+        private boolean scheduled;
+        /** The frame's pixels as `setPixels` takes them, one per push (the pushing thread's). */
+        private final Object fill = new Object();
+        private int[] pixels = new int[0];
+        /** A wrong frame was reported (once per stream). */
+        private boolean warned;
+        /** How many videos name the stream (readable off the UI thread). */
+        private volatile int attached;
+        private final android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
 
         Stream(String name) {
             this.name = name;
         }
 
+        /** Whether the registration takes frames rather than a surface. */
+        boolean takesFrames() {
+            return handle != null && handle.producer == null;
+        }
+
+        /** The videos naming the stream, the surface's first. */
+        java.util.List<VideoBox> videos() {
+            java.util.List<VideoBox> all = new java.util.ArrayList<>(waiting.size() + 1);
+            if (video != null) all.add(video);
+            all.addAll(waiting);
+            return all;
+        }
+
         /** Hands the video's surface to the producer, once per surface. */
         void offer() {
-            if (handle == null || video == null || handed) return;
+            if (handle == null || handle.producer == null || video == null || handed) return;
             android.view.Surface surface = video.streamSurface();
             if (surface == null) return;
             handed = true;
@@ -749,6 +781,94 @@ final class Mounter {
             if (!handed) return;
             handed = false;
             handle.producer.onSurfaceGone();
+        }
+
+        /** `NshStream.pushBgra`, any thread. */
+        void pushBgra(NshStream from, java.nio.ByteBuffer bytes, int width, int height, int stride) {
+            String wrong = null;
+            if (from.producer != null) wrong = "the stream was registered with a producer";
+            else if (width <= 0 || height <= 0) wrong = "the size is empty";
+            else if (stride < width * 4L) wrong = "the stride is shorter than a row of BGRA pixels";
+            else if (bytes.remaining() < stride * (long) height) wrong = "the bytes are fewer than stride × height";
+            if (wrong != null) {
+                synchronized (lock) {
+                    if (warned) return;
+                    warned = true;
+                }
+                android.util.Log.w("nsh", "stream `" + name + "`: a frame of " + width + "×" + height + " with "
+                        + stride + " bytes per row and " + bytes.remaining() + " bytes shows nothing: " + wrong);
+                return;
+            }
+            // No video shows the stream, or the registration ended: the
+            // bytes are not even copied.
+            if (handle != from || attached == 0) return;
+            android.graphics.Bitmap bitmap;
+            synchronized (lock) {
+                bitmap = free.pollFirst();
+            }
+            if (bitmap != null && (bitmap.getWidth() != width || bitmap.getHeight() != height)) {
+                bitmap.recycle();
+                bitmap = null;
+            }
+            if (bitmap == null) {
+                bitmap = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888);
+            }
+            // `setPixels` takes `0xAARRGGBB` ints, which the bytes B, G, R,
+            // A are when read as little-endian ints: no swizzle, one call
+            // for the frame.
+            synchronized (fill) {
+                if (pixels.length < width * height) pixels = new int[width * height];
+                java.nio.ByteBuffer src = bytes.duplicate().order(java.nio.ByteOrder.LITTLE_ENDIAN);
+                int start = bytes.position();
+                for (int y = 0; y < height; y++) {
+                    src.position(start + y * stride);
+                    src.asIntBuffer().get(pixels, y * width, width);
+                }
+                bitmap.setPixels(pixels, 0, width, 0, 0, width, height);
+            }
+            boolean schedule;
+            synchronized (lock) {
+                if (pending != null) free.addLast(pending);
+                pending = bitmap;
+                schedule = !scheduled;
+                scheduled = true;
+            }
+            if (schedule) main.post(this::deliver);
+        }
+
+        /** Draws the pending frame in every video naming the stream (UI thread). */
+        private void deliver() {
+            android.graphics.Bitmap bitmap;
+            synchronized (lock) {
+                scheduled = false;
+                bitmap = pending;
+                pending = null;
+            }
+            if (bitmap == null) return;
+            if (takesFrames()) {
+                if (width != bitmap.getWidth() || height != bitmap.getHeight()) {
+                    width = bitmap.getWidth();
+                    height = bitmap.getHeight();
+                    for (VideoBox v : videos()) v.streamSized();
+                }
+                for (VideoBox v : videos()) v.streamDraw(bitmap);
+            }
+            synchronized (lock) {
+                free.addLast(bitmap);
+            }
+        }
+
+        /** The registration changed: pending frames go, and the pool with them. */
+        void clearFrames() {
+            synchronized (lock) {
+                if (pending != null) pending.recycle();
+                pending = null;
+                for (android.graphics.Bitmap b : free) b.recycle();
+                free.clear();
+            }
+            synchronized (fill) {
+                pixels = new int[0];
+            }
         }
     }
 
@@ -765,11 +885,12 @@ final class Mounter {
     NshStream registerStream(String name, NshStream.Producer producer) {
         Stream s = stream(name);
         s.withdraw();
+        s.clearFrames();
         s.handle = new NshStream(this, s, producer);
         s.width = 0;
         s.height = 0;
         missingStreams.remove(name);
-        if (s.video != null) s.video.streamRegistered();
+        for (VideoBox v : s.videos()) v.streamRegistered();
         return s.handle;
     }
 
@@ -778,58 +899,61 @@ final class Mounter {
         Stream s = handle.stream;
         if (s.handle != handle) return;
         s.withdraw();
+        s.clearFrames();
         s.handle = null;
         s.width = 0;
         s.height = 0;
-        if (s.video != null) s.video.streamEnded();
+        for (VideoBox v : s.videos()) v.streamEnded();
     }
 
-    /** `NshStream.setSize`. */
+    /** `NshStream.setSize`, for a producer's stream. */
     void streamSize(NshStream handle, int width, int height) {
         Stream s = handle.stream;
-        if (s.handle != handle) return;
+        if (s.handle != handle || s.takesFrames()) return;
         s.width = width;
         s.height = height;
         if (s.video != null) s.video.streamSized();
     }
 
     /**
-     * Attaches `video` to stream `name`: the entry, whose `video` is this one
-     * when it shows the frames (once the name is registered; a name nothing
-     * registered is logged once), or another video that shows the stream
-     * already (logged once): then this one waits in line and takes over when
+     * Attaches `video` to stream `name`: the entry (a name nothing registered
+     * is logged once). A stream that takes frames draws them in every video
+     * attached; a producer's stream shows in the entry's `video`, and a
+     * second video naming it (logged once) waits in line and takes over when
      * that one stops showing it.
      */
     Stream attachStream(String name, VideoBox video) {
         Stream s = stream(name);
         if (s.video != null && s.video != video) {
-            if (busyStreams.add(name)) {
+            if (!s.takesFrames() && busyStreams.add(name)) {
                 android.util.Log.w("nsh", "stream `" + name + "` shows in a video already: a second video shows nothing until the first stops");
             }
             if (!s.waiting.contains(video)) s.waiting.add(video);
-            return s;
+        } else {
+            if (s.handle == null && missingStreams.add(name)) {
+                android.util.Log.w("nsh", "no stream is registered as `" + name + "`: the video shows nothing");
+            }
+            s.video = video;
         }
-        if (s.handle == null && missingStreams.add(name)) {
-            android.util.Log.w("nsh", "no stream is registered as `" + name + "`: the video shows nothing");
-        }
-        s.video = video;
+        s.attached = s.videos().size();
         return s;
     }
 
     /**
-     * `video` stops showing stream `s` (the producer loses its surface, and
-     * the first video waiting for the stream takes it over, unless the app is
-     * stopping) or stops waiting for it.
+     * `video` stops naming stream `s`: the first video's producer loses its
+     * surface, and the first video waiting for the stream takes it over,
+     * unless the app is stopping.
      */
     void detachStream(Stream s, VideoBox video) {
         if (s.video != video) {
             s.waiting.remove(video);
-            return;
+        } else {
+            s.withdraw();
+            s.video = null;
+            busyStreams.remove(s.name);
+            if (!destroying && !s.waiting.isEmpty()) s.waiting.remove(0).streamTakeOver();
         }
-        s.withdraw();
-        s.video = null;
-        busyStreams.remove(s.name);
-        if (!destroying && !s.waiting.isEmpty()) s.waiting.remove(0).streamTakeOver();
+        s.attached = s.videos().size();
     }
 
     /** The app is stopping: videos detach from their streams, none takes over. */
