@@ -166,8 +166,6 @@ fn unshared(image: &Arc<RenderImage>) -> bool {
 struct Live {
     /// The stream it shows, while `stream` names one.
     attached: RefCell<Option<Attached>>,
-    /// `onLoad` was sent for the stream's first frame.
-    loaded: Cell<bool>,
 }
 
 impl Live {
@@ -191,7 +189,6 @@ impl Live {
         let Some(name) = &p.stream else {
             if self.attached.borrow_mut().take().is_some() {
                 picture.clear();
-                self.loaded.set(false);
             }
             return false;
         };
@@ -203,7 +200,6 @@ impl Live {
         if !same {
             self.attached.borrow_mut().take();
             picture.clear();
-            self.loaded.set(false);
             emitter.emit(EventKind::LoadStart, || EventPayload::None);
             // The sink runs on the main thread and finds the video again by
             // surface key and node id: it holds nothing of the item.
@@ -243,20 +239,17 @@ impl Live {
         event: StreamEvent<'_>,
     ) {
         match event {
-            StreamEvent::Frame(frame) => {
+            StreamEvent::Frame { frame, first } => {
                 let size = (frame.width, frame.height);
                 picture.show(Frame {
                     image: frame.image.clone(),
                     size,
                 });
-                if !self.loaded.replace(true) {
+                if first {
                     emitter.emit(EventKind::Load, || load_payload(0.0, size.0, size.1));
                 }
             }
-            StreamEvent::Ended => {
-                picture.clear();
-                self.loaded.set(false);
-            }
+            StreamEvent::Ended => picture.clear(),
         }
         surface.invalidate();
     }

@@ -40,7 +40,9 @@ crates/
                        pointer decisions (`input.rs`: what a pointer may start, presses, hover, hit areas, wheel latching),
                        navigation decisions (`navigation.rs`: stacks' screens, transitions' timing and motion, what going back
                        acts on), one view's transitions, layout animations and keyframes (`transition.rs`: curves,
-                       interpolation, timing), scroll views' state and physics (`scroll.rs`);
+                       interpolation, timing), scroll views' state and physics (`scroll.rs`), the registry of the
+                       live streams `<Video srcObject>` plays (`stream.rs`: names, the newest frame, the sinks'
+                       rules; the backends give the frame type and the hop to their main thread);
                        Rust components that run once (`element/`: signals, elements, bindings, typed styles, design tokens;
                        `core/components.rs`, `core/views.rs`), classes TS uses with `new` (`element/class.rs`), JS's calls into
                        Rust and what comes back, typed (`element/call.rs`: ops carrying closures, the event stream, posts); UI sets as data for the

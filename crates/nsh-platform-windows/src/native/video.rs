@@ -309,11 +309,12 @@ impl VideoItem {
     /// A frame of the stream, or its end, on the UI thread.
     fn stream_event(&self, surface: &Surface, event: StreamEvent<'_>) {
         match event {
-            StreamEvent::Frame(frame) => {
+            StreamEvent::Frame { frame, first } => {
                 if !self.show_frame(frame) {
                     return;
                 }
-                if !self.status.loaded.replace(true) {
+                self.status.loaded.set(true);
+                if first {
                     let (w, h) = (frame.width as u32, frame.height as u32);
                     self.natural.set((w, h));
                     self.emitter

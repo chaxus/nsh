@@ -796,9 +796,10 @@ impl VideoHost {
                 return;
             };
             match event {
-                StreamEvent::Frame(frame) => {
+                StreamEvent::Frame { frame, first } => {
                     picture.set_paintable(Some(&frame.texture()));
-                    if !status.loaded.replace(true) {
+                    status.loaded.set(true);
+                    if first {
                         let (width, height) = (frame.width, frame.height);
                         emitter.emit(EventKind::Load, || {
                             EventPayload::Map(vec![
