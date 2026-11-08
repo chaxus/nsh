@@ -46,6 +46,7 @@ mod scroll;
 mod selectable_view;
 mod shader;
 mod sound;
+mod stream;
 mod surface;
 #[cfg(feature = "dev")]
 mod synth;
@@ -72,4 +73,5 @@ pub use crate::{
     image::AssetBase,
     links::set_exec_args,
     native::{ComponentContext, ComponentFactory, Components, NativeComponent},
+    stream::StreamHandle,
 };

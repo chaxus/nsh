@@ -1,9 +1,11 @@
 // A case of the API's test suite (docs/dev/compatibility.md): a video given
 // a live stream the embedding app registered (`srcObject`,
 // `MediaStream.fromHost`) beside its `src`: the handle's name, the
-// stream set, cleared and set again; a name that is not one is a
-// `TypeError`. Its script checks them (the platform's side of `srcObject`
-// once nsh-compat reads it).
+// stream set, cleared and set again, a second video of the stream that is
+// `paused` (it shows the stream's first frame and reports `onLoad` for it,
+// as a paused `<video>` does); a name that is not one is a `TypeError`.
+// Its script checks them (the platform's side of `srcObject` once
+// nsh-compat reads it).
 import { MediaStream, Text, Video, View, signal } from "nsh";
 
 function App() {
@@ -25,6 +27,13 @@ function App() {
         src="https://example.com/fallback.mp4"
         srcObject={live() ? stream : null}
         muted
+        style={{ width: 160, height: 90 }}
+      />
+      <Video
+        testID="still"
+        srcObject={live() ? stream : null}
+        muted
+        paused
         style={{ width: 160, height: 90 }}
       />
     </View>

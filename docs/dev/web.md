@@ -825,8 +825,8 @@ scroll events postpone it, and the browser's `scrollend` cancels it.
   over `src` (`videoStream`, `videoSource`). The player lets go of it when the video's owner is cleaned up (a cleanup
   run under the node's owner, so an effect's rerun keeps it), when `srcObject` changes and when a run starts. Events
   report a live stream's `Infinity` duration (and an unknown `NaN`) as 0 (`mediaDuration`), and `seek` leaves a
-  stream as it is. The core checks a stream's name (1 to 256 bytes); it tells no platform apart, so a backend that
-  does not play streams yet shows nothing for one, as for a native component it has not registered.
+  stream as it is. The core checks a stream's name (1 to 256 bytes); it tells no platform apart (every backend plays
+  them: `embedding.md` "Live streams").
 - **Registered native components** are the native apps' own: their view stays empty, with a warning once per name.
 - **The host** (`nsh`'s `host`): the page answers the app's calls with `createPlayer`'s `host` option, an object whose
   `call(name, args)` returns the result or a promise of it. `Command::HostCall` is the command `hostCall` (`encode.rs`;

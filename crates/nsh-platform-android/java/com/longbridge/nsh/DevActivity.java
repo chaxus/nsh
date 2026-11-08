@@ -37,6 +37,11 @@ public final class DevActivity extends Activity {
         // An app on its own, not a module embedded in another app: no limits.
         view.useStandaloneLimits();
         setContentView(view);
+        // A live stream the tests play (`<Video srcObject={MediaStream.fromHost("nsh/test-pattern")}>`).
+        new TestPattern(view.registerStream("nsh/test-pattern")).start();
+        // The same pattern as a producer drawing into the video's surface
+        // (`nsh/test-pattern-surface`), so the surface form is tested too.
+        view.registerStream("nsh/test-pattern-surface", new SurfacePattern()).setSize(TestPattern.WIDTH, TestPattern.HEIGHT);
         view.handleNotificationIntent(getIntent());
         // A recreated activity's intent was handed in already.
         if (state == null) view.handleUrlSchemeIntent(getIntent());
@@ -56,6 +61,118 @@ public final class DevActivity extends Activity {
         }
         String url = getIntent().getStringExtra("url");
         view.connectDevServer(url != null ? url : "ws://127.0.0.1:8790/ws");
+    }
+
+    /**
+     * The stream `nsh/test-pattern`, as every development host registers it
+     * (`nsh_dev::pattern`): a hue sweeping through the colors behind a white
+     * bar crossing left to right, {@link #WIDTH} by {@link #HEIGHT} pixels of
+     * BGRA pushed from a thread of its own at about 30 frames per second,
+     * for as long as the host runs.
+     */
+    static final class TestPattern extends Thread {
+        static final int WIDTH = 320, HEIGHT = 180, STRIDE = WIDTH * 4;
+        private static final int BAR = 8, STEP = 4, FRAME_MS = 33;
+        private final NshStream stream;
+
+        TestPattern(NshStream stream) {
+            super("nsh-test-pattern");
+            this.stream = stream;
+            setDaemon(true);
+        }
+
+        @Override
+        public void run() {
+            java.nio.ByteBuffer bgra = java.nio.ByteBuffer.allocate(STRIDE * HEIGHT);
+            for (int tick = 0; ; tick++) {
+                frame(tick, bgra.array());
+                bgra.clear();
+                stream.pushBgra(bgra, WIDTH, HEIGHT, STRIDE);
+                try {
+                    Thread.sleep(FRAME_MS);
+                } catch (InterruptedException e) {
+                    return;
+                }
+            }
+        }
+
+        /** Draws the pattern at `tick` into `bgra` (`STRIDE * HEIGHT` bytes). */
+        static void frame(int tick, byte[] bgra) {
+            int rgb = android.graphics.Color.HSVToColor(new float[] {tick % 360, 1, 1});
+            byte r = (byte) ((rgb >> 16) & 0xFF), g = (byte) ((rgb >> 8) & 0xFF), b = (byte) (rgb & 0xFF);
+            int bar = tick * STEP % WIDTH;
+            for (int y = 0; y < HEIGHT; y++) {
+                int row = y * STRIDE;
+                for (int x = 0; x < WIDTH; x++) {
+                    int i = row + x * 4;
+                    boolean white = Math.abs(x - bar) < BAR;
+                    bgra[i] = white ? (byte) 0xFF : b;
+                    bgra[i + 1] = white ? (byte) 0xFF : g;
+                    bgra[i + 2] = white ? (byte) 0xFF : r;
+                    bgra[i + 3] = (byte) 0xFF;
+                }
+            }
+        }
+    }
+
+    /**
+     * The stream `nsh/test-pattern-surface`: the test pattern drawn with a
+     * `Canvas` into the surface of the video showing it, on a thread of its
+     * own at about 30 frames per second, the producer form of a stream.
+     */
+    static final class SurfacePattern implements NshStream.Producer {
+        private static final int BAR = 16, STEP = 4, FRAME_MS = 33;
+        private final android.graphics.Paint bar = new android.graphics.Paint();
+        private android.os.HandlerThread thread;
+        private android.os.Handler handler;
+        private volatile android.view.Surface surface;
+        private int tick;
+
+        SurfacePattern() {
+            bar.setColor(android.graphics.Color.WHITE);
+        }
+
+        @Override
+        public void onSurface(android.view.Surface surface) {
+            this.surface = surface;
+            thread = new android.os.HandlerThread("nsh-test-pattern-surface");
+            thread.start();
+            handler = new android.os.Handler(thread.getLooper());
+            handler.post(this::frame);
+        }
+
+        @Override
+        public void onSurfaceGone() {
+            // Not joined: `lockCanvas` blocks while the view is not drawn
+            // (hidden, detached), and the UI thread must not wait on it. A
+            // frame in progress ends on the released surface, which
+            // `frame` tolerates.
+            surface = null;
+            thread.quit();
+            thread = null;
+            handler = null;
+        }
+
+        private void frame() {
+            android.view.Surface s = surface;
+            android.os.Handler h = handler;
+            if (s == null || h == null) return;
+            try {
+                android.graphics.Canvas c = s.lockCanvas(null);
+                float sx = c.getWidth() / (float) TestPattern.WIDTH, sy = c.getHeight() / (float) TestPattern.HEIGHT;
+                c.drawColor(android.graphics.Color.HSVToColor(new float[] {tick % 360, 1, 1}));
+                float x = (tick * STEP % TestPattern.WIDTH) * sx;
+                c.drawRect(x, 0, x + BAR * sx, TestPattern.HEIGHT * sy, bar);
+                s.unlockCanvasAndPost(c);
+            } catch (IllegalArgumentException | IllegalStateException
+                    | android.view.Surface.OutOfResourcesException e) {
+                // The surface went (or has no buffer) between the check and
+                // the lock, or was released while the canvas was held: the
+                // next frame finds `surface` cleared.
+            }
+            tick++;
+            h.postDelayed(this::frame, FRAME_MS);
+        }
     }
 
     private static void deleteTree(java.io.File file) {

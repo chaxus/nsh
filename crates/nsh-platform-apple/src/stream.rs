@@ -1,31 +1,21 @@
 //! Live streams the embedding app registers by name, which `<Video
 //! srcObject>` plays (`MediaStream.fromHost(name)`, `VideoProps::stream`):
-//! the host pushes frames (`CVPixelBuffer`s) from any thread, and each
-//! video showing the stream draws them in an `AVSampleBufferDisplayLayer`
-//! of its own, on the main thread. The frames never pass through JS.
+//! the host pushes frames (`CVPixelBuffer`s, or BGRA bytes copied into
+//! one) from any thread, and each video showing the stream draws them in
+//! an `AVSampleBufferDisplayLayer` of its own, on the main thread. The
+//! frames never pass through JS.
 //!
-//! A name is one entry ([`Shared`]) whether the host registered it or a
-//! video asked for it first: a video attaches its layer to the entry, and
-//! the frames of a registration that comes later reach it. A name nothing
-//! registered is logged once, as an unknown native component is.
+//! The registry is the core's ([`nsh_core::stream`]: one entry per name
+//! whether the host registered it or a video asked for it first, the
+//! newest frame delivered with one dispatch to the main queue, `paused`
+//! keeping the last frame, the end blanking the layers, a frame that does
+//! not fit its size logged once); this module is the Apple side: the
+//! frame type, the dispatch, and the layer each video's sink draws in.
 
-use std::{
-    cell::{Cell, RefCell},
-    collections::{HashMap, HashSet},
-    ffi::c_void,
-    ptr::NonNull,
-    rc::Rc,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
-};
+use std::{ffi::c_void, ptr::NonNull, sync::Arc};
 
-use dispatch2::{DispatchQueue, MainThreadBound};
-use objc2::{
-    Encode, Encoding, MainThreadMarker, encode::RefEncode, msg_send, rc::Retained,
-    runtime::AnyObject,
-};
+use dispatch2::DispatchQueue;
+use objc2::{Encode, Encoding, encode::RefEncode, msg_send, rc::Retained, runtime::AnyObject};
 
 /// CoreVideo's `CVPixelBufferRef`: a frame the embedding app hands a
 /// stream, retained while NSH holds it.
@@ -72,7 +62,22 @@ unsafe extern "C" {
 unsafe extern "C" {
     fn CVPixelBufferGetWidth(buffer: *const c_void) -> usize;
     fn CVPixelBufferGetHeight(buffer: *const c_void) -> usize;
+    fn CVPixelBufferCreate(
+        allocator: *const c_void,
+        width: usize,
+        height: usize,
+        format: u32,
+        attributes: *const c_void,
+        out: *mut *mut c_void,
+    ) -> i32;
+    fn CVPixelBufferLockBaseAddress(buffer: *mut c_void, flags: u64) -> i32;
+    fn CVPixelBufferUnlockBaseAddress(buffer: *mut c_void, flags: u64) -> i32;
+    fn CVPixelBufferGetBaseAddress(buffer: *mut c_void) -> *mut u8;
+    fn CVPixelBufferGetBytesPerRow(buffer: *mut c_void) -> usize;
 }
+
+/// `kCVPixelFormatType_32BGRA`.
+const BGRA: u32 = 0x4247_5241;
 
 #[link(name = "CoreMedia", kind = "framework")]
 unsafe extern "C" {
@@ -95,8 +100,12 @@ unsafe extern "C" {
     ) -> *const c_void;
 }
 
-/// A frame: a retained `CVPixelBuffer`.
-struct Frame(NonNull<c_void>);
+/// A frame: a retained `CVPixelBuffer`, and the sample buffer of it once
+/// a layer asked for one (made once, shared by every video showing it).
+struct Frame {
+    buffer: NonNull<c_void>,
+    sample: std::sync::OnceLock<Option<Sample>>,
+}
 
 // SAFETY: a CVPixelBuffer is a CoreFoundation object, which any thread may
 // hold and release.
@@ -112,22 +121,70 @@ impl Frame {
         let buffer = NonNull::new(buffer)?;
         // SAFETY: a live CF object, as the caller guarantees.
         unsafe { CFRetain(buffer.as_ptr()) };
-        Some(Frame(buffer))
+        Some(Frame::new(buffer))
+    }
+
+    /// A new BGRA buffer of `width` × `height` pixels holding `bytes`
+    /// (`stride` bytes a row), or `None` when CoreVideo refuses the size.
+    fn from_bgra(width: usize, height: usize, stride: usize, bytes: &[u8]) -> Option<Self> {
+        let mut buffer: *mut c_void = std::ptr::null_mut();
+        // SAFETY: CoreVideo's documented API; the buffer is locked while
+        // its rows are written, and comes retained (+1), which `Frame`
+        // releases.
+        unsafe {
+            if CVPixelBufferCreate(
+                std::ptr::null(),
+                width,
+                height,
+                BGRA,
+                std::ptr::null(),
+                &mut buffer,
+            ) != 0
+            {
+                return None;
+            }
+            let buffer = NonNull::new(buffer)?;
+            CVPixelBufferLockBaseAddress(buffer.as_ptr(), 0);
+            let base = CVPixelBufferGetBaseAddress(buffer.as_ptr());
+            let own = CVPixelBufferGetBytesPerRow(buffer.as_ptr());
+            for y in 0..height {
+                std::ptr::copy_nonoverlapping(
+                    bytes[y * stride..].as_ptr(),
+                    base.add(y * own),
+                    width * 4,
+                );
+            }
+            CVPixelBufferUnlockBaseAddress(buffer.as_ptr(), 0);
+            Some(Frame::new(buffer))
+        }
+    }
+
+    /// A frame of a retained `buffer`.
+    fn new(buffer: NonNull<c_void>) -> Self {
+        Frame {
+            buffer,
+            sample: std::sync::OnceLock::new(),
+        }
     }
 
     fn size(&self) -> (usize, usize) {
         // SAFETY: a retained CVPixelBuffer.
         unsafe {
             (
-                CVPixelBufferGetWidth(self.0.as_ptr()),
-                CVPixelBufferGetHeight(self.0.as_ptr()),
+                CVPixelBufferGetWidth(self.buffer.as_ptr()),
+                CVPixelBufferGetHeight(self.buffer.as_ptr()),
             )
         }
     }
 
-    /// A sample buffer of the frame to display at once, or `None` when
-    /// CoreMedia refuses the buffer (not a video pixel format).
-    fn sample(&self) -> Option<Sample> {
+    /// The sample buffer of the frame to display at once, made once for
+    /// every layer showing it; `None` when CoreMedia refuses the buffer
+    /// (not a video pixel format).
+    fn sample(&self) -> Option<&Sample> {
+        self.sample.get_or_init(|| self.make_sample()).as_ref()
+    }
+
+    fn make_sample(&self) -> Option<Sample> {
         let mut format: *const c_void = std::ptr::null();
         let mut sample: *const c_void = std::ptr::null();
         // SAFETY: CoreMedia's documented API on a retained CVPixelBuffer;
@@ -135,7 +192,7 @@ impl Frame {
         unsafe {
             if CMVideoFormatDescriptionCreateForImageBuffer(
                 std::ptr::null(),
-                self.0.as_ptr(),
+                self.buffer.as_ptr(),
                 &mut format,
             ) != 0
                 || format.is_null()
@@ -145,7 +202,7 @@ impl Frame {
             let timing = CMSampleTimingInfo::default();
             let made = CMSampleBufferCreateReadyWithImageBuffer(
                 std::ptr::null(),
-                self.0.as_ptr(),
+                self.buffer.as_ptr(),
                 format,
                 &timing,
                 &mut sample,
@@ -170,8 +227,8 @@ impl Frame {
 
 impl Drop for Frame {
     fn drop(&mut self) {
-        // SAFETY: retained in `retain`.
-        unsafe { CFRelease(self.0.as_ptr()) };
+        // SAFETY: retained in `retain` or created in `from_bgra`.
+        unsafe { CFRelease(self.buffer.as_ptr()) };
     }
 }
 
@@ -193,6 +250,12 @@ unsafe impl RefEncode for OpaqueCMSampleBuffer {
 /// A `CMSampleBuffer` made for one frame.
 struct Sample(*const c_void);
 
+// SAFETY: a CMSampleBuffer is a CoreFoundation object, which any thread may
+// hold and release; it lives in its `Frame`, which crosses threads.
+unsafe impl Send for Sample {}
+// SAFETY: as above; it is only read through `as_ref`.
+unsafe impl Sync for Sample {}
+
 impl Sample {
     /// The buffer as `enqueueSampleBuffer:` takes it.
     fn as_ref(&self) -> *const OpaqueCMSampleBuffer {
@@ -202,135 +265,19 @@ impl Sample {
 
 impl Drop for Sample {
     fn drop(&mut self) {
-        // SAFETY: created in `Frame::sample`.
+        // SAFETY: created in `Frame::make_sample`.
         unsafe { CFRelease(self.0) };
-    }
-}
-
-/// A video showing a stream: its display layer and what it hears.
-struct Sink {
-    key: u64,
-    /// The `AVSampleBufferDisplayLayer`.
-    layer: Retained<AnyObject>,
-    /// `paused`: frames are dropped, the last one stays.
-    paused: Cell<bool>,
-    /// Whether the first frame's size was reported.
-    loaded: Cell<bool>,
-    /// Hears the first frame's size (pixels): the video's `onLoad`.
-    on_size: Box<dyn Fn(usize, usize)>,
-}
-
-/// What a stream's main-thread side keeps: the videos showing it.
-#[derive(Default)]
-struct Sinks {
-    sinks: Vec<Sink>,
-}
-
-/// One stream by name, shared by its registration and the videos showing
-/// it. Frames come from any thread; the layers are drawn on the main
-/// thread, one dispatch per batch of frames (a frame pushed before the
-/// previous one was drawn replaces it: a live stream shows the newest).
-pub(crate) struct Shared {
-    name: Arc<str>,
-    /// The frame waiting to be drawn.
-    pending: Mutex<Option<Frame>>,
-    /// A draw is queued on the main thread for `pending`.
-    scheduled: AtomicBool,
-    /// Whether a registration is live (frames may come).
-    registered: AtomicBool,
-    main: MainThreadBound<RefCell<Sinks>>,
-}
-
-impl Shared {
-    fn new(name: Arc<str>, mtm: MainThreadMarker) -> Arc<Self> {
-        Arc::new(Shared {
-            name,
-            pending: Mutex::new(None),
-            scheduled: AtomicBool::new(false),
-            registered: AtomicBool::new(false),
-            main: MainThreadBound::new(RefCell::default(), mtm),
-        })
-    }
-
-    /// Queues `frame` and a draw of it on the main thread (one at a time).
-    fn push(self: &Arc<Self>, frame: Frame) {
-        if !self.registered.load(Ordering::Acquire) {
-            return;
-        }
-        *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(frame);
-        if self.scheduled.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let shared = self.clone();
-        DispatchQueue::main().exec_async(move || {
-            let mtm = MainThreadMarker::new().expect("main queue");
-            shared.scheduled.store(false, Ordering::Release);
-            let frame = shared
-                .pending
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .take();
-            if let Some(frame) = frame {
-                shared.draw(mtm, &frame);
-            }
-        });
-    }
-
-    /// Draws `frame` in every sink that is not paused.
-    fn draw(&self, mtm: MainThreadMarker, frame: &Frame) {
-        let sinks = self.main.get(mtm).borrow();
-        let mut sample = None;
-        for sink in sinks.sinks.iter().filter(|s| !s.paused.get()) {
-            if sample.is_none() {
-                sample = frame.sample();
-            }
-            let Some(sample) = &sample else { return };
-            // SAFETY: AVSampleBufferDisplayLayer's documented API; the
-            // sample buffer is live until `sample` drops.
-            unsafe {
-                // 2: failed (a buffer it could not decode): flush and go on.
-                let status: isize = msg_send![&sink.layer, status];
-                if status == 2 {
-                    let _: () = msg_send![&sink.layer, flush];
-                }
-                let _: () = msg_send![&sink.layer, enqueueSampleBuffer: sample.as_ref()];
-            }
-            if !sink.loaded.replace(true) {
-                let (width, height) = frame.size();
-                (sink.on_size)(width, height);
-            }
-        }
-    }
-
-    /// The registration ended: the videos show nothing until another.
-    fn end(self: &Arc<Self>) {
-        self.registered.store(false, Ordering::Release);
-        self.pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        let shared = self.clone();
-        DispatchQueue::main().exec_async(move || {
-            let mtm = MainThreadMarker::new().expect("main queue");
-            for sink in &shared.main.get(mtm).borrow().sinks {
-                // SAFETY: AVSampleBufferDisplayLayer's documented API.
-                let _: () = unsafe { msg_send![&sink.layer, flushAndRemoveImage] };
-                sink.loaded.set(false);
-            }
-        });
     }
 }
 
 /// A stream the embedding app registered ([`Streams::register`]): where it
 /// pushes the frames. Any thread. Dropping it ends the stream.
-pub struct StreamHandle {
-    shared: Arc<Shared>,
-}
+pub struct StreamHandle(nsh_core::stream::StreamHandle<Frame>);
 
 impl std::fmt::Debug for StreamHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StreamHandle")
-            .field("name", &self.shared.name)
+            .field("name", &self.0.name())
             .finish()
     }
 }
@@ -338,140 +285,131 @@ impl std::fmt::Debug for StreamHandle {
 impl StreamHandle {
     /// The name it was registered as.
     pub fn name(&self) -> &str {
-        &self.shared.name
+        self.0.name()
     }
 
     /// Shows `frame` in the videos playing the stream. Retains it; the
     /// caller keeps its own reference. A frame that comes before the
-    /// previous one was drawn replaces it.
+    /// previous one was drawn replaces it; while no video shows the stream
+    /// the frame is not retained.
     ///
     /// # Safety
     ///
     /// `frame` is a `CVPixelBufferRef` (null shows nothing).
     pub unsafe fn push(&self, frame: CVPixelBufferRef) {
+        if !self.0.wanted() {
+            return;
+        }
         // SAFETY: guaranteed by the caller.
         if let Some(frame) = unsafe { Frame::retain(frame) } {
-            self.shared.push(frame);
+            self.0.push(frame);
         }
+    }
+
+    /// Shows a frame given as bytes: `width` × `height` pixels of BGRA (8
+    /// bits each), `stride` bytes a row (at least `width * 4`), copied into
+    /// a `CVPixelBuffer`, as the other platforms' handles take frames. A
+    /// frame that comes before the previous one was drawn replaces it. A
+    /// size the bytes do not cover, or an empty one, is logged once and
+    /// shows nothing; while no video shows the stream the bytes are not
+    /// copied.
+    pub fn push_bgra(&self, width: usize, height: usize, stride: usize, bytes: &[u8]) {
+        self.0
+            .push_bgra(width, height, stride, bytes, Frame::from_bgra);
     }
 
     /// Ends the stream: the videos playing it show nothing from now on,
     /// until the name is registered again.
     pub fn end(&self) {
-        self.shared.end();
-    }
-}
-
-impl Drop for StreamHandle {
-    fn drop(&mut self) {
-        self.shared.end();
+        self.0.end();
     }
 }
 
 /// A video's attachment to a stream, by name ([`Streams::attach`]); dropping
 /// it detaches the video's layer.
-pub struct Attached {
-    shared: Arc<Shared>,
-    key: u64,
-}
+pub struct Attached(nsh_core::stream::Attached<Frame>);
 
 impl Attached {
     /// The stream's name.
     pub fn name(&self) -> &Arc<str> {
-        &self.shared.name
+        self.0.name()
     }
 
     /// Stops or resumes drawing frames in the video's layer (the last one
-    /// stays).
+    /// stays; a layer with none yet still draws the first).
     pub fn set_paused(&self, paused: bool) {
-        let mtm = MainThreadMarker::new().expect("main thread");
-        for sink in &self.shared.main.get(mtm).borrow().sinks {
-            if sink.key == self.key {
-                sink.paused.set(paused);
-            }
-        }
+        self.0.set_paused(paused);
     }
 }
-
-impl Drop for Attached {
-    fn drop(&mut self) {
-        let mtm = MainThreadMarker::new().expect("main thread");
-        let mut sinks = self.shared.main.get(mtm).borrow_mut();
-        sinks.sinks.retain(|s| s.key != self.key);
-    }
-}
-
-static NEXT_KEY: AtomicU64 = AtomicU64::new(1);
 
 /// The streams of one surface, by name (shared with its videos, so a
 /// registration applies to videos showing the name from then on, and to
 /// those already showing it). Main thread.
-#[derive(Clone, Default)]
-pub struct Streams {
-    entries: Rc<RefCell<HashMap<Arc<str>, Arc<Shared>>>>,
-    /// Names already reported as unregistered.
-    missing: Rc<RefCell<HashSet<Arc<str>>>>,
+#[derive(Clone)]
+pub struct Streams(nsh_core::stream::Streams<Frame>);
+
+impl Default for Streams {
+    fn default() -> Self {
+        // The hop: one dispatch to the main queue per batch of frames.
+        Streams(nsh_core::stream::Streams::new(
+            |job: Box<dyn FnOnce() + Send>| {
+                DispatchQueue::main().exec_async(job);
+                true
+            },
+        ))
+    }
 }
 
 impl std::fmt::Debug for Streams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_set().entries(self.entries.borrow().keys()).finish()
+        self.0.fmt(f)
     }
 }
 
 impl Streams {
-    /// The entry of `name`, made if none.
-    fn entry(&self, name: &str, mtm: MainThreadMarker) -> Arc<Shared> {
-        let mut entries = self.entries.borrow_mut();
-        if let Some(shared) = entries.get(name) {
-            return shared.clone();
-        }
-        let name: Arc<str> = name.into();
-        let shared = Shared::new(name.clone(), mtm);
-        entries.insert(name, shared.clone());
-        shared
-    }
-
     /// Registers stream `name` (replacing an earlier registration): the
     /// handle takes its frames. The videos whose `srcObject` names it,
     /// now or later, play it. Main thread.
     pub fn register(&self, name: &str) -> StreamHandle {
-        let mtm = MainThreadMarker::new().expect("register a stream on the main thread");
-        let shared = self.entry(name, mtm);
-        shared.registered.store(true, Ordering::Release);
-        self.missing.borrow_mut().remove(name);
-        StreamHandle { shared }
+        StreamHandle(self.0.register(name))
     }
 
     /// Attaches `layer`, a video's `AVSampleBufferDisplayLayer`, to stream
     /// `name`: it draws the frames, and `on_size` hears the first frame's
-    /// size (pixels). A name nothing registered is logged once; the layer
-    /// draws once something is.
+    /// size (pixels) after each start of the stream. A name nothing
+    /// registered is logged once; the layer draws once something is.
     pub fn attach(
         &self,
         name: &str,
         layer: Retained<AnyObject>,
         on_size: Box<dyn Fn(usize, usize)>,
     ) -> Attached {
-        let mtm = MainThreadMarker::new().expect("main thread");
-        let shared = self.entry(name, mtm);
-        if !shared.registered.load(Ordering::Acquire)
-            && self.missing.borrow_mut().insert(shared.name.clone())
-        {
-            log::warn!(
-                target: "js",
-                "no stream is registered as `{name}`: the video shows nothing"
-            );
-        }
-        let key = NEXT_KEY.fetch_add(1, Ordering::Relaxed);
-        shared.main.get(mtm).borrow_mut().sinks.push(Sink {
-            key,
-            layer,
-            paused: Cell::new(false),
-            loaded: Cell::new(false),
-            on_size,
-        });
-        Attached { shared, key }
+        let sink = Box::new(
+            move |event: nsh_core::stream::StreamEvent<'_, Frame>| match event {
+                nsh_core::stream::StreamEvent::Frame { frame, first } => {
+                    let Some(sample) = frame.sample() else { return };
+                    // SAFETY: AVSampleBufferDisplayLayer's documented API; the
+                    // sample buffer is live until `sample` drops.
+                    unsafe {
+                        // 2: failed (a buffer it could not decode): flush and go on.
+                        let status: isize = msg_send![&layer, status];
+                        if status == 2 {
+                            let _: () = msg_send![&layer, flush];
+                        }
+                        let _: () = msg_send![&layer, enqueueSampleBuffer: sample.as_ref()];
+                    }
+                    if first {
+                        let (width, height) = frame.size();
+                        on_size(width, height);
+                    }
+                }
+                nsh_core::stream::StreamEvent::Ended => {
+                    // SAFETY: AVSampleBufferDisplayLayer's documented API.
+                    let _: () = unsafe { msg_send![&layer, flushAndRemoveImage] };
+                }
+            },
+        );
+        Attached(self.0.attach(name, sink))
     }
 }
 

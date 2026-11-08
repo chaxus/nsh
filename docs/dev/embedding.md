@@ -67,8 +67,25 @@
   from any thread, the newest waits for one main-thread dispatch, and each video showing the name draws them in an
   `AVSampleBufferDisplayLayer` (`videoGravity` from `resize_mode`, `onLoad` from the first frame's size, `paused`
   keeps the last frame). A name is one entry whether registered or asked for first, so a video attached before the
-  registration draws once it comes. A backend that does not take streams yet (Android, Windows, Linux, GPUI) shows
-  nothing for one, as for a native component it has not registered.
+  registration draws once it comes. The registry itself is the core's, toolkit-free and generic over the frame
+  type (`nsh_core::stream`: `Streams<F>::new(hop)`, `register`, `attach`, `StreamHandle<F>`, `Attached<F>`; the
+  entries by name, the newest frame waiting for one hop to the main thread, the sinks' `paused` / first-frame rule,
+  the end, the size check logged once, and no copy or hop while no video shows the stream); each backend's
+  `stream.rs` wraps it with its frame type and its hop (`DispatchQueue::main`, `UiThread::invoke`,
+  `glib::MainContext::invoke`, `rt::invoke`) and keeps its own `StreamHandle` / `Streams` types over it. The Apple
+  handles also take bytes (`push_bgra(width, height, stride, bytes)`, copied into a `CVPixelBuffer`), which is the
+  only form on Windows, Linux and GPUI, drawn by their video items (an `ID2D1Bitmap1`, a `gdk::MemoryTexture` in a
+  `gtk::Picture`, a `RenderImage`; `docs/dev/windows.md`, `linux.md`, `gpui.md`). Android
+  takes BGRA frames the same way in Java (`NshView.registerStream(name)`, `NshStream.pushBgra` from any thread,
+  `Mounter.Stream`: a pool of three `Bitmap`s, the newest waiting for one hop to the UI thread, drawn with
+  `TextureView.lockCanvas` into every video naming the stream, `paused` keeping the last one), and also lets a
+  source draw into a `Surface` (`registerStream(name, producer)`): the producer gets the surface of the
+  `TextureView` of the video showing the stream (`onSurface`, `onSurfaceGone`), so a producer's stream shows in one
+  video at a time (a second is logged once and takes over when the first stops) and `paused` does nothing for it;
+  `VideoProps::stream` crosses as the 12th field of `NativeProps::Video` (`encode.rs` ↔ `Mounter.java`). Every
+  development host registers `nsh/test-pattern` (`nsh_dev::pattern`; Android's `DevActivity` pushes the same
+  frames from a thread), which `examples/gallery/tests/stream.test.tsx` plays under `nsh test --target` on every
+  platform.
 - **Native components** (`nsh`'s `nativeComponent`; `component.rs`, `ComponentBox.java`): the embedding app registers its own native
   views by name — Swift `NshAppView.register(component:) { context in … }` (`NshComponent`: `view`, `setProp`,
   `command`), Java `NshView.registerComponent(name, factory)` (`NshComponent`), Rust `AppView::register_component`

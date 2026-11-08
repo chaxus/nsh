@@ -442,6 +442,13 @@ impl AppView {
         self.surface.native.components().register(name, factory);
     }
 
+    /// Registers live stream `name` (`MediaStream.fromHost(name)` in JS,
+    /// played by `<Video srcObject>`): push its frames to the handle, from
+    /// any thread. Applies to the videos naming it, now or later.
+    pub fn register_stream(&self, name: &str) -> crate::StreamHandle {
+        self.surface.native.components().register_stream(name)
+    }
+
     /// Makes the window this view is drawn in its own, as
     /// [`open_app_window`]'s is: the app's title (`currentWindow().set({ title })`), title
     /// bar, application menu (macOS's menu bar, the menu bar drawn above

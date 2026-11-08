@@ -197,6 +197,8 @@ again replaces the running app. The complete sample is
 | `loadBundleFile(File file)` | Runs a `bundle.js` file; assets come from `assets/` next to it. Refuses `.nshc` files. |
 | `runPackage(NshPackage pkg)` | Runs a verified signed package, replacing the running app. A package runs once. |
 | `registerComponent(String name, NshComponent.Factory factory)` | Registers a [native component](./native-components.md). |
+| `registerStream(String name)` | Registers a [live stream](#live-streams) for `<Video srcObject>`: push its BGRA frames to the `NshStream` returned, from any thread. |
+| `registerStream(String name, NshStream.Producer producer)` | Registers a [live stream](#live-streams) the producer draws: the video showing it hands the producer a `Surface` to draw into. Returns the `NshStream`. |
 | `setParams(Object params)` | The launch parameters of the apps loaded next (a `Map` or `JSONObject`): the app reads them at start as `host.params` ([`host`](../modules/nsh.md#host)). Returns `false` when they are not a JSON object. |
 | `send(String name, Object data)` | Sends an event to the app (`host.on(name, …)`); kept until it listens, or for the next app while none runs. Any thread; returns `false` after `destroy()`. |
 | `handle(String name, HostHandler handler)` | Handles the app's calls (`host.call`) and posts (`host.post`) of `name` on the UI thread; `null` removes the handler. The handler answers through its `NshHostReply`, once, from any thread. |
@@ -217,6 +219,43 @@ Each app keeps its storage under its own id with no setting: a signed package un
 nsh.setStorageDirectory(new File(getFilesDir(), "nsh/com.example.orders"));
 nsh.loadAssetBundle("orders");
 ```
+
+## Live streams
+
+A video plays a live stream the host app registers, by name: `<Video srcObject={MediaStream.fromHost("call.remote")}>`
+([Live streams](../elements/video.md#live-streams)). The host pushes the frames as BGRA bytes from any thread, as the
+other platforms' SDKs take them: every video naming the stream draws each frame, fit by its `objectFit`, the first
+is `onLoad` (`duration` 0), `paused` keeps the last one.
+
+```java
+NshStream stream = nsh.registerStream("call.remote");
+// From the decoder's thread, for each frame: width × height pixels of BGRA, `stride` bytes per row (copied).
+stream.pushBgra(pixels, 1280, 720, 1280 * 4);
+// When the call ends: the videos show nothing until the name is registered again.
+stream.end();
+```
+
+A source that renders into a `Surface` of its own accord (Camera2, `MediaCodec`, ExoPlayer, a WebRTC renderer)
+registers a producer instead and draws into the video's surface directly, with no copy: the video showing the
+stream hands its surface to the `NshStream.Producer`, which draws into it until `onSurfaceGone`, and gets the next
+surface when the video has one again. `setSize` declares the frames' size, which the surface's buffers take and
+`objectFit` fits.
+
+```java
+NshStream stream = nsh.registerStream("call.remote", new NshStream.Producer() {
+    @Override public void onSurface(Surface surface) { call.setRemoteSink(surface); }   // draw into it from now on
+    @Override public void onSurfaceGone() { call.setRemoteSink(null); }               // stop before returning
+});
+stream.setSize(1280, 720);   // before the first frame: the surface's buffers take it, `objectFit` fits it
+```
+
+A surface belongs to one `TextureView`, so a producer's stream shows in one video at a time: a second video naming
+it shows nothing (logged once) until the first stops showing it, then takes it over; and the producer draws on its
+own clock, so `paused` leaves it playing. Pushed frames have neither limit.
+
+Register the stream before loading the app, as native components are; a video that names the stream before the
+registration shows it once it comes, and a name nothing registered shows nothing, logged once. `muted`, `volume`,
+`rate` and `controls` do not apply to a stream.
 
 ## Talking to the app
 
