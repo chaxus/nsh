@@ -17,7 +17,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -290,6 +290,9 @@ pub(crate) struct Shared {
     registered: AtomicBool,
     /// A frame of bytes that did not fit its size was reported.
     wrong_frame: AtomicBool,
+    /// How many videos show the stream (the sinks' count, readable off
+    /// the main thread): with none, a frame waits without a dispatch.
+    attached: AtomicUsize,
     main: MainThreadBound<RefCell<Sinks>>,
 }
 
@@ -301,16 +304,29 @@ impl Shared {
             scheduled: AtomicBool::new(false),
             registered: AtomicBool::new(false),
             wrong_frame: AtomicBool::new(false),
+            attached: AtomicUsize::new(0),
             main: MainThreadBound::new(RefCell::default(), mtm),
         })
     }
 
+    /// Whether frames are wanted: a registration is live and a video shows
+    /// the stream (with none, a host pushing at 30 fps costs nothing).
+    fn wanted(&self) -> bool {
+        self.registered.load(Ordering::Acquire) && self.attached.load(Ordering::Acquire) > 0
+    }
+
     /// Queues `frame` and a draw of it on the main thread (one at a time).
     fn push(self: &Arc<Self>, frame: Frame) {
-        if !self.registered.load(Ordering::Acquire) {
+        if !self.wanted() {
             return;
         }
         *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(frame);
+        self.schedule();
+    }
+
+    /// One draw of the pending frame on the main thread, unless one is on
+    /// its way.
+    fn schedule(self: &Arc<Self>) {
         if self.scheduled.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -438,6 +454,10 @@ impl StreamHandle {
             }
             return;
         }
+        // No video shows the stream: the bytes are not even copied.
+        if !self.shared.wanted() {
+            return;
+        }
         if let Some(frame) = Frame::from_bgra(width, height, stride, bytes) {
             self.shared.push(frame);
         }
@@ -486,6 +506,9 @@ impl Drop for Attached {
         let mtm = MainThreadMarker::new().expect("main thread");
         let mut sinks = self.shared.main.get(mtm).borrow_mut();
         sinks.sinks.retain(|s| s.key != self.key);
+        self.shared
+            .attached
+            .store(sinks.sinks.len(), Ordering::Release);
     }
 }
 
@@ -552,13 +575,26 @@ impl Streams {
             );
         }
         let key = NEXT_KEY.fetch_add(1, Ordering::Relaxed);
-        shared.main.get(mtm).borrow_mut().sinks.push(Sink {
-            key,
-            layer,
-            paused: Cell::new(false),
-            loaded: Cell::new(false),
-            on_size,
-        });
+        {
+            let mut sinks = shared.main.get(mtm).borrow_mut();
+            sinks.sinks.push(Sink {
+                key,
+                layer,
+                paused: Cell::new(false),
+                loaded: Cell::new(false),
+                on_size,
+            });
+            shared.attached.store(sinks.sinks.len(), Ordering::Release);
+        }
+        // A frame pushed but not drawn yet shows in the new video at once.
+        if shared
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            shared.schedule();
+        }
         Attached { shared, key }
     }
 }

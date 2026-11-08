@@ -110,14 +110,30 @@ impl Shared {
         *self.ui.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Whether frames are wanted: a registration is live and a video shows
+    /// the stream (with none, a host pushing at 30 fps costs nothing).
+    fn wanted(&self) -> bool {
+        self.registered.load(Ordering::Acquire)
+            && !self
+                .sinks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+    }
+
     /// Queues `frame` and a delivery of it on the UI thread (one at a
-    /// time). Nothing is queued before a video attaches: there is no one to
-    /// deliver to.
+    /// time).
     fn push(self: &Arc<Self>, frame: Frame) {
-        if !self.registered.load(Ordering::Acquire) {
+        if !self.wanted() {
             return;
         }
         *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(frame);
+        self.schedule();
+    }
+
+    /// One delivery of the pending frame on the UI thread, unless one is
+    /// on its way.
+    fn schedule(self: &Arc<Self>) {
         if self.scheduled.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -204,6 +220,10 @@ impl StreamHandle {
     /// stride under `width * 4`, an empty size) is logged once and shows
     /// nothing.
     pub fn push_bgra(&self, width: usize, height: usize, stride: usize, bytes: &[u8]) {
+        // No video shows the stream: the bytes are not even copied.
+        if !self.shared.wanted() {
+            return;
+        }
         if let Err(what) = check_frame(width, height, stride, bytes.len()) {
             if !self.shared.warned.swap(true, Ordering::Relaxed) {
                 log::warn!(
@@ -363,6 +383,15 @@ impl Streams {
                 loaded: AtomicBool::new(false),
                 sink,
             }));
+        // A frame pushed but not delivered yet shows in the new video at once.
+        if shared
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            shared.schedule();
+        }
         Attached { shared, key }
     }
 }
@@ -404,9 +433,9 @@ mod tests {
         let streams = Streams::default();
         let handle = streams.register("cam");
         let shared = handle.shared.clone();
-        // No video yet: the frame is kept, nothing is queued.
+        // No video yet: the frame is not even kept, nothing is queued.
         handle.push_bgra(1, 1, 4, &[1, 2, 3, 255]);
-        assert!(shared.pending.lock().unwrap().is_some());
+        assert!(shared.pending.lock().unwrap().is_none());
         assert!(!shared.scheduled.load(Ordering::Acquire));
         let _attached = streams.attach("cam", Box::new(|_| {}));
         handle.push_bgra(1, 1, 4, &[4, 5, 6, 255]);

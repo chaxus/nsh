@@ -108,7 +108,7 @@ impl Picture {
     fn release(&self) {
         let retired = std::mem::take(&mut *self.retired.borrow_mut());
         let current = self.frame.borrow_mut().take().map(|(frame, _)| frame.image);
-        for image in retired.into_iter().chain(current) {
+        for image in retired.into_iter().chain(current).filter(unshared) {
             crate::image::release_later(image);
         }
     }
@@ -117,7 +117,10 @@ impl Picture {
     /// to it), after dropping the frames replaced since the last draw from
     /// the atlas.
     fn draw(&self, cx: &mut DrawCx<'_>, size: (f32, f32), mode: ResizeMode) {
-        let retired = std::mem::take(&mut *self.retired.borrow_mut());
+        let retired: Vec<_> = std::mem::take(&mut *self.retired.borrow_mut())
+            .into_iter()
+            .filter(unshared)
+            .collect();
         if !retired.is_empty() {
             cx.paint(|window, _| {
                 for image in retired {
@@ -147,6 +150,14 @@ impl Picture {
         });
         *painted = true;
     }
+}
+
+/// Whether this picture is the image's last holder, so it may leave the
+/// atlas: a stream's frame is one image shared by every video showing it,
+/// and a paused video keeps painting one the others retired (it goes
+/// when that video retires it too).
+fn unshared(image: &Arc<RenderImage>) -> bool {
+    Arc::strong_count(image) == 1
 }
 
 /// A video's live stream (`srcObject`): the same with and without feature

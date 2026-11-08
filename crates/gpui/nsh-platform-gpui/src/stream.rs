@@ -100,21 +100,29 @@ impl Shared {
 
     /// Queues `frame` and a delivery of it on the main thread (one at a
     /// time).
+    /// Whether frames are wanted: a registration is live and a video shows
+    /// the stream (with none, a host pushing at 30 fps costs nothing, and
+    /// one pushing from before the app runs does not log at every frame).
+    fn wanted(&self) -> bool {
+        self.registered.load(Ordering::Acquire)
+            && !self
+                .sinks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+    }
+
     fn push(self: &Arc<Self>, frame: Frame) {
-        if !self.registered.load(Ordering::Acquire) {
-            return;
-        }
-        // No video shows the stream: nothing to hop for (a host pushing
-        // from before the app runs would log at every frame).
-        if self
-            .sinks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_empty()
-        {
+        if !self.wanted() {
             return;
         }
         *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(frame);
+        self.schedule();
+    }
+
+    /// One delivery of the pending frame on the main thread, unless one
+    /// is on its way.
+    fn schedule(self: &Arc<Self>) {
         if self.scheduled.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -191,6 +199,10 @@ impl StreamHandle {
     /// that does not fit its size (or has none) is a wrong use: it shows
     /// nothing, logged once per stream.
     pub fn push_bgra(&self, width: usize, height: usize, stride: usize, bytes: &[u8]) {
+        // No video shows the stream: the bytes are not even copied.
+        if !self.shared.wanted() {
+            return;
+        }
         let Some(frame) = frame_from_bgra(width, height, stride, bytes) else {
             if !self.shared.warned.swap(true, Ordering::AcqRel) {
                 log::warn!(
@@ -334,6 +346,15 @@ impl Streams {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(attachment.clone());
+        // A frame pushed but not delivered yet shows in the new video at once.
+        if shared
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            shared.schedule();
+        }
         Attached { shared, attachment }
     }
 }
