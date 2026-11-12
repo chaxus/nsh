@@ -685,6 +685,12 @@ pub(crate) fn encode(batch: MountBatch, web_generation: u64) -> Encoded {
                             _ => -1,
                         });
                     }
+                    // `Mounter.orientations` reads the `ModalConfig`
+                    // bits (0: the app's own).
+                    Command::Orientations(bits) => {
+                        e.int(54);
+                        e.int(i32::from(bits));
+                    }
                     Command::ImageInfo { id, uri } => {
                         e.int(19);
                         e.int(id as i32);
@@ -1275,6 +1281,9 @@ fn native_props(e: &mut Encoded, p: &NativeProps) {
                 AudioSession::Playback => 1,
                 AudioSession::MixWithOthers => 2,
             });
+            // The live stream it shows instead of the source (`srcObject`);
+            // `Mounter.nativeProps` case 4 reads the fields in this order.
+            e.opt_string(v.stream.as_deref());
         }
     }
 }

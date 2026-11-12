@@ -3359,9 +3359,19 @@
 		"web"
 	]);
 	function createDom(invoke, values, reactive, live, wake) {
-		const handlers = /* @__PURE__ */ new WeakMap(), owners = /* @__PURE__ */ new WeakMap(), heldProps = /* @__PURE__ */ new WeakMap();
-		let touches, measure, hot, platform;
+		const handlers = /* @__PURE__ */ new WeakMap(), owners = /* @__PURE__ */ new WeakMap(), heldProps = /* @__PURE__ */ new WeakMap(), videos = /* @__PURE__ */ new WeakSet(), streamed = /* @__PURE__ */ new WeakSet();
+		let touches, measure, hot, platform, srcObjects;
 		const prototype = Object.create(null);
+		const videoStream = (node, stream) => {
+			if (!live()) throw new Error("the app was disposed");
+			const id = values.nodeIds.get(node);
+			if (stream && !streamed.has(node)) {
+				streamed.add(node);
+				const owner = owners.get(node);
+				if (owner) reactive.runWithOwner(owner, () => reactive.cleanup(() => live() && srcObjects?.(id, null)));
+			}
+			srcObjects?.(id, stream);
+		};
 		for (const name of [
 			"focus",
 			"blur",
@@ -3498,6 +3508,11 @@
 			if (PLATFORM_PROPS.has(name)) {
 				platformProps(node, name, value);
 				return;
+			}
+			if (name === "srcObject" && videos.has(node)) {
+				const own = value != null && typeof value === "object" && !values.instances.has(value);
+				videoStream(node, own ? value : null);
+				if (own) value = null;
 			}
 			call(303, [
 				node,
@@ -3645,6 +3660,9 @@
 			setHot(value) {
 				hot = value;
 			},
+			setSrcObjects(value) {
+				srcObjects = value;
+			},
 			rootProp: (name, value) => prop(root, name, value),
 			listen(node, name, value) {
 				let events = handlers.get(node);
@@ -3658,7 +3676,11 @@
 				]);
 			},
 			rt: {
-				element: (tag) => call(300, [tag]),
+				element: (tag) => {
+					const node = call(300, [tag]);
+					if (tag === "video") videos.add(node);
+					return node;
+				},
 				text: (value) => call(301, [String(value)]),
 				prop,
 				bindProp,

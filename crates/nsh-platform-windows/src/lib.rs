@@ -57,6 +57,7 @@ mod selectable_view;
 mod session;
 mod shader;
 mod shell;
+mod stream;
 mod surface;
 #[cfg(feature = "dev")]
 mod synth;
@@ -88,5 +89,6 @@ pub use crate::{
     },
     image::AssetBase,
     native::{ComponentContext, ComponentFactory, Components, NativeComponent, Wheel},
+    stream::StreamHandle,
     text::DWriteTextEngine,
 };

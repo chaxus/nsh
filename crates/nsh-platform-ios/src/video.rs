@@ -1,15 +1,16 @@
 //! `<video>`: AVPlayer in an `AVPlayerLayer`, or in an
-//! `AVPlayerViewController` for the platform's controls. AVFoundation and
-//! AVKit are loaded on first use (`dlopen`), so apps without videos do not
-//! pay for them at launch.
+//! `AVPlayerViewController` for the platform's controls; a live stream the
+//! embedding app registered (`srcObject`) in an `AVSampleBufferDisplayLayer`
+//! fed by `nsh_platform_apple::stream`. AVFoundation and AVKit are loaded
+//! on first use (`dlopen`), so apps without videos do not pay for them at
+//! launch.
 
 use std::{cell::Cell, ffi::CStr, ptr::NonNull, rc::Rc, sync::OnceLock};
 
 use block2::RcBlock;
-use nsh_core::{
-    AudioSession, EventKind, EventPayload, NodeId, PayloadValue, ResizeMode, VideoProps,
-};
+use nsh_core::{AudioSession, EventKind, EventPayload, NodeId, PayloadValue, VideoProps};
 use nsh_engine::EngineControl;
+use nsh_platform_apple::stream::{Attached, Streams, display_layer, gravity};
 use objc2::{
     Encode, Encoding, MainThreadMarker, msg_send,
     rc::Retained,
@@ -237,6 +238,11 @@ pub(crate) struct VideoHost {
     ended: Rc<Cell<bool>>,
     /// Its key in [`audio_playing`].
     audio_key: u64,
+    /// The surface's live streams.
+    streams: Streams,
+    /// The stream it shows (`srcObject`) and the display layer drawing it.
+    stream: Option<Attached>,
+    stream_layer: Option<Retained<AnyObject>>,
 }
 
 impl VideoHost {
@@ -245,6 +251,7 @@ impl VideoHost {
         id: NodeId,
         control: EngineControl,
         asset_base: Option<AssetBase>,
+        streams: Streams,
     ) -> Self {
         let view = NshView::new(mtm);
         view.setClipsToBounds(true);
@@ -263,6 +270,9 @@ impl VideoHost {
             repeat: Rc::default(),
             ended: Rc::default(),
             audio_key: NEXT_AUDIO_KEY.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            streams,
+            stream: None,
+            stream_layer: None,
         }
     }
 
@@ -284,40 +294,63 @@ impl VideoHost {
         if !av_foundation() {
             return log::error!("cannot load AVFoundation");
         }
-        if p.source != self.props.source || self.player.is_none() {
-            self.open(p.source.as_deref());
-        }
-        if p.controls != self.props.controls || self.layer.is_none() && self.controller.is_none() {
-            self.attach(p.controls);
-        }
-        if p.progress_interval_ms != self.props.progress_interval_ms || self.time_observer.is_none()
-        {
-            self.observe(p.progress_interval_ms);
-        }
-        self.repeat.set(p.repeat);
-        if let Some(player) = &self.player {
-            // Played from the end, a video starts over: a seek the app
-            // makes in the same turn arrives after these props.
-            if !p.paused && self.props.paused && self.ended.replace(false) {
-                seek_exactly(player, 0.0);
+        if let Some(name) = &p.stream {
+            // A live stream plays instead of the URL: the player goes, a
+            // display layer draws the frames the embedding app pushes.
+            if self.stream.as_ref().map(|s| &**s.name()) != Some(&**name) {
+                self.close();
+                self.show_stream(name);
             }
-            // SAFETY: AVPlayer's documented API.
-            unsafe {
-                let _: () = msg_send![player, setMuted: Bool::new(p.muted)];
-                let _: () = msg_send![player, setVolume: p.volume];
-                if p.paused {
-                    let _: () = msg_send![player, pause];
-                } else {
-                    let _: () = msg_send![player, setRate: p.rate];
+            if let Some(stream) = &self.stream {
+                stream.set_paused(p.paused);
+                stream.set_sound(p.muted, p.volume);
+            }
+            // The stream's audio, if the host pushes any, plays in the
+            // app's session as a player's does: while the video plays.
+            let playing = self.stream.is_some() && !p.paused;
+            audio_playing(self.audio_key, playing.then_some(p.audio_session));
+        } else {
+            if self.stream.is_some() {
+                self.hide_stream();
+            }
+            if p.source != self.props.source || self.player.is_none() {
+                self.open(p.source.as_deref());
+            }
+            if p.controls != self.props.controls
+                || self.layer.is_none() && self.controller.is_none()
+            {
+                self.attach(p.controls);
+            }
+            if p.progress_interval_ms != self.props.progress_interval_ms
+                || self.time_observer.is_none()
+            {
+                self.observe(p.progress_interval_ms);
+            }
+            self.repeat.set(p.repeat);
+            if let Some(player) = &self.player {
+                // Played from the end, a video starts over: a seek the app
+                // makes in the same turn arrives after these props.
+                if !p.paused && self.props.paused && self.ended.replace(false) {
+                    seek_exactly(player, 0.0);
+                }
+                // SAFETY: AVPlayer's documented API.
+                unsafe {
+                    let _: () = msg_send![player, setMuted: Bool::new(p.muted)];
+                    let _: () = msg_send![player, setVolume: p.volume];
+                    if p.paused {
+                        let _: () = msg_send![player, pause];
+                    } else {
+                        let _: () = msg_send![player, setRate: p.rate];
+                    }
                 }
             }
+            // The audio session follows what plays, not what is mounted.
+            let playing = self.player.is_some() && !p.paused;
+            audio_playing(self.audio_key, playing.then_some(p.audio_session));
         }
-        let gravity = NSString::from_str(match p.resize_mode {
-            ResizeMode::Cover => "AVLayerVideoGravityResizeAspectFill",
-            ResizeMode::Stretch => "AVLayerVideoGravityResize",
-            _ => "AVLayerVideoGravityResizeAspect",
-        });
-        // SAFETY: AVPlayerLayer / AVPlayerViewController setters.
+        let gravity = gravity(p.resize_mode);
+        // SAFETY: AVPlayerLayer / AVPlayerViewController /
+        // AVSampleBufferDisplayLayer setters.
         unsafe {
             if let Some(layer) = &self.layer {
                 let _: () = msg_send![layer, setVideoGravity: &*gravity];
@@ -325,11 +358,52 @@ impl VideoHost {
             if let Some(controller) = &self.controller {
                 let _: () = msg_send![controller, setVideoGravity: &*gravity];
             }
+            if let Some(layer) = &self.stream_layer {
+                let _: () = msg_send![layer, setVideoGravity: &*gravity];
+            }
         }
-        // The audio session follows what plays, not what is mounted.
-        let playing = self.player.is_some() && !p.paused;
-        audio_playing(self.audio_key, playing.then_some(p.audio_session));
         self.props = p;
+    }
+
+    /// Shows stream `name` in a display layer fed by the surface's streams.
+    fn show_stream(&mut self, name: &str) {
+        self.hide_stream();
+        let Some(layer) = display_layer() else {
+            return log::error!("cannot make an AVSampleBufferDisplayLayer");
+        };
+        // SAFETY: an AVSampleBufferDisplayLayer is a CALayer.
+        let ca: &objc2_quartz_core::CALayer = unsafe { &*(Retained::as_ptr(&layer) as *const _) };
+        ca.setFrame(self.view.bounds());
+        self.view.layer().addSublayer(ca);
+        self.control
+            .dispatch_event(self.id, EventKind::LoadStart, EventPayload::None);
+        let (control, id) = (self.control.clone(), self.id);
+        let on_size = Box::new(move |width: usize, height: usize| {
+            control.dispatch_event(
+                id,
+                EventKind::Load,
+                EventPayload::Map(vec![
+                    ("duration", PayloadValue::Number(0.0)),
+                    ("width", PayloadValue::Number(width as f64)),
+                    ("height", PayloadValue::Number(height as f64)),
+                ]),
+            );
+        });
+        self.stream = Some(self.streams.attach(name, layer.clone(), on_size));
+        self.stream_layer = Some(layer);
+    }
+
+    /// Stops showing the stream, if any.
+    fn hide_stream(&mut self) {
+        if self.stream.take().is_some() {
+            audio_playing(self.audio_key, None);
+        }
+        if let Some(layer) = self.stream_layer.take() {
+            // SAFETY: an AVSampleBufferDisplayLayer is a CALayer.
+            let ca: &objc2_quartz_core::CALayer =
+                unsafe { &*(Retained::as_ptr(&layer) as *const _) };
+            ca.removeFromSuperlayer();
+        }
     }
 
     /// Starts playing `source` (or nothing).
@@ -514,8 +588,9 @@ impl VideoHost {
 
     /// Lays the player out at the view's size.
     pub(crate) fn layout(&self) {
-        if let Some(layer) = &self.layer {
-            // SAFETY: an AVPlayerLayer is a CALayer.
+        for layer in [&self.layer, &self.stream_layer].into_iter().flatten() {
+            // SAFETY: an AVPlayerLayer / AVSampleBufferDisplayLayer is a
+            // CALayer.
             let ca: &objc2_quartz_core::CALayer =
                 unsafe { &*(Retained::as_ptr(layer) as *const _) };
             crate::decor::quiet_frame(ca, self.view.bounds());
@@ -547,6 +622,7 @@ fn seek_exactly(player: &AnyObject, seconds: f64) {
 impl Drop for VideoHost {
     fn drop(&mut self) {
         self.close();
+        self.hide_stream();
     }
 }
 

@@ -71,7 +71,7 @@ cargo test adds_a_todo        # 名称包含 "adds_a_todo" 的测试
 `scroll(selector, px(3000.0))`、`back`、`wait`、`wait_for`、`wait_for_gone`、`wait_until`、`run_for`、`fast_forward`、
 `set_system_time`、`set_viewport`、`set_clipboard` 和 `on_dialog`；`app.shows(text)` 和 `app.screen()`（`texts()`、
 `count(selector)`、`enabled(selector)`、`dialogs()`、`clipboard()`、`commands()`）读取屏幕上的内容。无法执行的步骤会返回一个错误，
-附带屏幕上的文字。
+附带屏幕上的文字。`app.clear_commands()` 让 `commands()` 从头记起，长测试只留下它要检查的那些步骤发出的命令。
 
 `nsh_testing::tsx(entry, sets)`（feature `bundle`）以同样的方式打开应用的 TSX 入口，基于 NSH 的和 crate 的 UI 集合构建
 （[用 Rust 开发](./rust.md#测试)）。`examples/gallery-rs` 就这样测试它的 Rust 根组件，每个演示一个模块；`examples/rust-exports`
@@ -486,6 +486,9 @@ await expect(app.press("Pay")).rejects.toMatchObject({ code: "ERR_NSH_TEST_DISAB
 `call` 抛出异常、Promise 被拒绝或返回值不是 JSON 时，应用的调用以它的消息被拒绝，与页面上一致；应用启动前发送的事件
 会在应用启动后送到它顶层注册的监听器。`--web-host <module>` 指定另一个模块。应用调用的函数必须列在它的 `capabilities.host` 中，
 与页面上一致。调用的超时和宿主自己的定时器都按应用的时间计算，手动时钟（`app.clock.runFor`）会推进它们。在浏览器中（`--target web`），开发页面像发布的页面一样为每个应用运行 `nsh.json` 的 `web.host`；在其他平台上（`--target`）应用没有宿主：`host.available()` 为 `false`。
+不过每个开发宿主都注册一个实时流 `nsh/test-pattern`（320×180、每秒 30 帧的测试图案），测试在任何平台上都能播放一个流：
+`<Video srcObject={HostStream.fromHost("nsh/test-pattern")}>` 以这个尺寸加载（[实时流](./native-components.md#实时流)），
+前提是应用的 `nsh.json` 授予了它（`"capabilities": { "streams": ["nsh/test-pattern"] }`）；headless 时没人注册它，视频什么也不显示。
 
 ```tsx
 // nsh.json：{ "capabilities": { "host": ["echo"] }, "web": { "host": "./host.js" } }

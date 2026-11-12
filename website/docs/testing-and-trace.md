@@ -76,7 +76,8 @@ options set below: `storage` (`MemoryStorage::new(entries)`), `network` (`StubNe
 `scroll(selector, px(3000.0))`, `back`, `wait`, `wait_for`, `wait_for_gone`, `wait_until`, `run_for`, `fast_forward`,
 `set_system_time`, `set_viewport`, `set_clipboard` and `on_dialog`; `app.shows(text)` and `app.screen()` (`texts()`,
 `count(selector)`, `enabled(selector)`, `dialogs()`, `clipboard()`, `commands()`) read what is on screen. A step
-returns an error with the texts on screen when it cannot be taken.
+returns an error with the texts on screen when it cannot be taken. `app.clear_commands()` starts the record of
+`commands()` afresh, so a long test keeps only the commands of the steps it checks.
 
 `nsh_testing::tsx(entry, sets)` (feature `bundle`) opens an app's TSX entry the same way, built against NSH's and the
 crate's UI sets ([Building with Rust](./rust.md#testing)). `examples/gallery-rs` tests its Rust root this way, one
@@ -533,6 +534,10 @@ once it does. `--web-host <module>` names another module. The app's `capabilitie
 the page. A call's timeout and the host's own timers run on the app's time, so a manual clock moves them
 (`app.clock.runFor`). In a browser (`--target web`) the development page runs `nsh.json`'s `web.host` for each app as a
 published page does; on the other platforms (`--target`) the apps have no host: `host.available()` is `false`.
+Every development host does register one live stream, `nsh/test-pattern` (a 320×180 test pattern at 30 frames a
+second), so a test can play a stream on any platform: `<Video srcObject={HostStream.fromHost("nsh/test-pattern")}>`
+loads with that size ([Live streams](./native-components.md#live-streams)) in an app whose `nsh.json` grants it
+(`"capabilities": { "streams": ["nsh/test-pattern"] }`); headless, nothing registers it and the video shows nothing.
 
 ```tsx
 // nsh.json: { "capabilities": { "host": ["echo"] }, "web": { "host": "./host.js" } }

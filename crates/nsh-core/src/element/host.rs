@@ -251,17 +251,22 @@ impl ParentElement for Stack {}
 impl ParentElement for Screen {}
 impl ParentElement for Modal {}
 
-/// Android has no input accessories: there the bar keeps no content.
+/// Only iOS shows input accessories (`InputAccessoryView` in `nsh/ios`
+/// checks the same): elsewhere the bar keeps no content and takes no room.
+fn has_input_accessory() -> bool {
+    super::ambient::try_os().unwrap_or_default() == crate::platform::Os::Ios
+}
+
 impl ParentElement for InputAccessoryView {
     fn child<M>(mut self, child: impl super::IntoChild<M>) -> Self {
-        if !cfg!(target_os = "android") {
+        if has_input_accessory() {
             child.__push_into(&mut self.0.children);
         }
         self
     }
 
     fn children(mut self, children: impl IntoIterator<Item = impl IntoElement>) -> Self {
-        if !cfg!(target_os = "android") {
+        if has_input_accessory() {
             self.0
                 .children
                 .extend(children.into_iter().map(|c| c.into_element().0));
@@ -328,22 +333,23 @@ pub fn modal() -> Modal {
 /// A bar shown over the keyboard of the inputs whose
 /// [`Input::input_accessory`] is `native_id` (iOS's `inputAccessoryView`):
 /// as wide as the window and as tall as its content, moving with the
-/// keyboard natively. It takes no room where the view places it; on
-/// Android, which has no input accessories, it is an empty hidden view.
+/// keyboard natively. It takes no room where the view places it; off iOS,
+/// where there are no input accessories, it is an empty hidden view.
 pub fn input_accessory_view(native_id: &str) -> InputAccessoryView {
-    let tag = if cfg!(target_os = "android") {
-        Tag::View
-    } else {
+    let supported = has_input_accessory();
+    let tag = if supported {
         Tag::InputAccessory
+    } else {
+        Tag::View
     };
     let mut node = ElNode::new(tag);
-    if cfg!(target_os = "android") {
+    if supported {
+        set(&mut node, Prop::NativeId(Some(native_id.into())));
+    } else {
         node.style.value(
             crate::StyleKey::Display,
             crate::PropertyValue::Display(taffy::Display::None),
         );
-    } else {
-        set(&mut node, Prop::NativeId(Some(native_id.into())));
     }
     InputAccessoryView(node)
 }
@@ -659,12 +665,49 @@ pub fn web_view_html(html: impl IntoReactive<String>, base_url: Option<&str>) ->
     WebView(ElNode::new(Tag::WebView)).html(html, base_url)
 }
 
-/// A video playing the file or stream at `url` (a bound one plays the new
-/// one when it changes).
-pub fn video(url: impl IntoReactive<String>) -> Video {
-    Video(ElNode::new(Tag::Video)).bind_prop(url, |url: String| {
-        Prop::Native(NativeProp::Source(WebSource::Uri(url.into())))
-    })
+/// A video player: what it plays is [`Video::src`] (a file or stream at a
+/// URL) or [`Video::src_object`] (a live stream the embedding app
+/// registered); with neither it shows nothing.
+pub fn video() -> Video {
+    Video(ElNode::new(Tag::Video))
+}
+
+/// A live stream the embedding app registered by name (a call's video, a
+/// camera), which [`Video::src_object`] plays (TS: `HostStream`,
+/// `HostStream.fromHost(name)`). It holds only the name: the embedding
+/// app owns the stream.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct HostStream {
+    name: Arc<str>,
+}
+
+impl HostStream {
+    /// The stream the embedding app registered as `name`. A name nothing
+    /// registered shows nothing (logged once, as a native component's).
+    pub fn from_host(name: impl Into<Arc<str>>) -> Self {
+        Self { name: name.into() }
+    }
+
+    /// The name the embedding app registered the stream with.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn name_arc(&self) -> Arc<str> {
+        self.name.clone()
+    }
+
+    /// What a stream's name may be: 1 to 256 bytes.
+    pub(crate) fn checked(name: &str) -> Result<(), String> {
+        if name.is_empty() || name.len() > 256 {
+            return Err(format!(
+                "HostStream.fromHost: a name has 1 to 256 bytes (this one has {})",
+                name.len()
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// The embedder's native component registered as `name`.
@@ -956,6 +999,17 @@ impl Screen {
         self.bind_prop(hides, |v| {
             Prop::Screen(ScreenProp::HidesBottomBarWhenPushed(v))
         })
+    }
+
+    /// The orientations the screen may take while the page is shown (iOS
+    /// and Android; default: the app's). Of the pages displayed, the one
+    /// shown most recently with a setting decides.
+    pub fn supported_orientations(
+        self,
+        orientations: impl IntoIterator<Item = Orientation>,
+    ) -> Self {
+        let bits = orientations.into_iter().fold(0, |bits, o| bits | o.bits());
+        self.set(Prop::Screen(ScreenProp::Orientations(bits)))
     }
 
     /// A large title (iOS); the content scrolls under the header.
@@ -1414,9 +1468,13 @@ pub enum Orientation {
     PortraitUpsideDown,
     /// Either landscape.
     Landscape,
-    /// Landscape, the top on the left.
+    /// Landscape with the device turned clockwise from upright, its home
+    /// side on the left: UIKit's `landscapeLeft`, Android's reverse
+    /// landscape.
     LandscapeLeft,
-    /// Landscape, the top on the right.
+    /// Landscape with the device turned counterclockwise from upright, its
+    /// home side on the right: UIKit's `landscapeRight`, Android's
+    /// landscape.
     LandscapeRight,
 }
 
@@ -1605,6 +1663,23 @@ impl WebView {
 }
 
 impl Video {
+    /// Plays the file or stream at `url` (TS: `src`; an asset's `uri` too:
+    /// `video().src(CLIP.uri)`); a bound one plays the new one when it
+    /// changes.
+    pub fn src(self, url: impl IntoReactive<String>) -> Self {
+        self.bind_prop(url, |url: String| {
+            Prop::Native(NativeProp::Source(WebSource::Uri(url.into())))
+        })
+    }
+
+    /// Plays `stream`, a live stream the embedding app registered, instead
+    /// of the URL (TS: `srcObject`); `None` plays the URL again.
+    pub fn src_object(self, stream: impl IntoReactive<Option<HostStream>>) -> Self {
+        self.bind_prop(stream, |stream: Option<HostStream>| {
+            Prop::Native(NativeProp::SrcObject(stream.map(|s| s.name)))
+        })
+    }
+
     /// Paused.
     pub fn paused(self, paused: impl IntoReactive<bool>) -> Self {
         self.bind_prop(paused, |paused: bool| {

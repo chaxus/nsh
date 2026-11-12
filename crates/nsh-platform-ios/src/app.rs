@@ -8,9 +8,10 @@ use objc2::{
 use objc2_core_foundation::CGSize;
 use objc2_foundation::{NSObject, NSObjectProtocol, NSSet, NSString, NSURL};
 use objc2_ui_kit::{
-    UIApplication, UIApplicationDelegate, UIResponder, UIScene, UISceneConfiguration,
-    UISceneConnectionOptions, UISceneDelegate, UISceneSession, UIViewController, UIWindow,
-    UIWindowScene, UIWindowSceneDelegate, UIWindowSceneSessionRoleApplication,
+    UIApplication, UIApplicationDelegate, UIInterfaceOrientationMask, UIResponder, UIScene,
+    UISceneConfiguration, UISceneConnectionOptions, UISceneDelegate, UISceneSession,
+    UIViewController, UIWindow, UIWindowScene, UIWindowSceneDelegate,
+    UIWindowSceneSessionRoleApplication,
 };
 
 use crate::{image::AssetBase, surface::SurfaceOptions, view::AppView};
@@ -56,6 +57,12 @@ pub struct AppOptions {
     /// Logs the performance monitor's readings once a second
     /// ([`SurfaceOptions::fps`]).
     pub fps: bool,
+    /// Registers on the view's native components and live streams
+    /// ([`SurfaceOptions::components`]) before the app runs, as the
+    /// development host registers `nsh/test-pattern`
+    /// (`Components::register_stream`). A function, since the options wait
+    /// in a static for the scene to come (a registry is main-thread only).
+    pub setup: Option<fn(&crate::component::Components)>,
 }
 
 /// Whether `path` is inside the app's own bundle (which the system verifies
@@ -168,10 +175,11 @@ define_class!(
 );
 
 define_class!(
-    /// The window's root controller: shows the status bar the app sets.
+    /// The window's root controller: shows the status bar the app sets,
+    /// and takes the orientations of the page shown.
     #[unsafe(super(UIViewController, UIResponder, NSObject))]
     #[thread_kind = MainThreadOnly]
-    struct RootController;
+    pub(crate) struct RootController;
 
     impl RootController {
         #[unsafe(method(preferredStatusBarStyle))]
@@ -187,6 +195,15 @@ define_class!(
         #[unsafe(method(preferredStatusBarUpdateAnimation))]
         fn preferred_status_bar_update_animation(&self) -> objc2_ui_kit::UIStatusBarAnimation {
             crate::system::status_bar_animation()
+        }
+
+        #[unsafe(method(supportedInterfaceOrientations))]
+        fn supported_interface_orientations(&self) -> UIInterfaceOrientationMask {
+            if let Some(mask) = crate::system::page_orientations() {
+                return mask;
+            }
+            // SAFETY: calling the superclass implementation.
+            unsafe { msg_send![super(self), supportedInterfaceOrientations] }
         }
     }
 );
@@ -242,6 +259,13 @@ fn connect(mtm: MainThreadMarker, scene: &UIWindowScene) {
                 .data_dir
                 .or_else(|| SurfaceOptions::default().data_dir),
             cache: options.cache,
+            components: {
+                let components = crate::component::Components::default();
+                if let Some(setup) = options.setup {
+                    setup(&components);
+                }
+                components
+            },
             // An app on its own (the development host, the release runner),
             // not a module embedded in another app.
             limits: nsh_engine::Limits::standalone(),

@@ -69,6 +69,7 @@ pub use crate::element::{
     HapticImpact,
     HapticNotification,
     HintReason,
+    HostStream,
     Hsla,
     // The network.
     HttpRequest,

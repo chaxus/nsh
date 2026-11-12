@@ -60,6 +60,7 @@ pub mod shape;
 pub mod single_instance;
 pub mod speech;
 pub mod storage;
+pub mod stream;
 mod style;
 #[cfg(feature = "svg")]
 pub mod svg;
