@@ -1205,6 +1205,32 @@ impl From<nsh_core::ResolvedTextStyle> for SpanStyle {
     }
 }
 
+/// The style of a view as the app set it (`app.viewStyle`). Colors are
+/// `#rrggbbaa`. The values are those the app set last: while an animation
+/// runs, its end value. A background the platform draws itself (a native
+/// control's) is not here; check it with a screenshot.
+#[derive(Debug, Clone, PartialEq, JsObject)]
+#[non_exhaustive]
+pub struct ViewStyle {
+    /// Its `backgroundColor`, absent when transparent.
+    #[prop(skip_none)]
+    pub background_color: Option<String>,
+    /// Its own `opacity`.
+    pub opacity: f64,
+    /// The opacity it shows with: its own times every view's around it.
+    pub effective_opacity: f64,
+}
+
+impl From<crate::screen::ViewStyle> for ViewStyle {
+    fn from(style: crate::screen::ViewStyle) -> Self {
+        ViewStyle {
+            background_color: style.background_color.map(|c| format!("#{c:08x}")),
+            opacity: f64::from(style.opacity),
+            effective_opacity: f64::from(style.effective_opacity),
+        }
+    }
+}
+
 /// What [`WaitOptions`] waits for.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PropEnum)]
 pub enum WaitState {
@@ -1890,7 +1916,8 @@ impl Keyboard {
 
     /// Holds modifier keys down (`"mod"`, `"shift"`, `"alt"`, `"ctrl"`,
     /// `"meta"`, joined by `+`) until `up`: the presses, drags and hovers
-    /// meanwhile carry them (a Mod-click, a Shift-drag). Headless and on Linux.
+    /// meanwhile carry them (a Mod-click, a Shift-drag). Headless and on Linux;
+    /// elsewhere it rejects (`ERR_NSH_TEST_UNSUPPORTED`).
     pub async fn down(this: Instance<Self>, keys: String) -> Result<(), JsError> {
         let steps = this.with(|k| k.steps.clone());
         steps.run(move |app| app.hold_keys(&keys, true)).await
@@ -1978,7 +2005,8 @@ impl App {
 
     /// Drops local files (`file:` URLs, as a file manager drags them) on
     /// the middle of what `selector` names: it, or the nearest view around
-    /// it listening, hears `onFileDrop`. Desktops, headless and on Linux for now.
+    /// it listening, hears `onFileDrop`. Desktops, headless, on Linux and
+    /// on macOS for now.
     pub async fn drop_files(
         this: Instance<Self>,
         selector: String,
@@ -2192,6 +2220,14 @@ impl App {
     /// an empty span reports an error because it has no first character.
     pub fn span_style(&self, selector: String) -> Result<SpanStyle, JsError> {
         self.with(|app| app.span_style(&selector).map(SpanStyle::from))
+    }
+
+    /// The style of the view `selector` names: `backgroundColor` (absent
+    /// when transparent), its own `opacity` and `effectiveOpacity` (times
+    /// every view's around it); `null` when none matches. The values are
+    /// those the app set last, an animation's end value while it runs.
+    pub fn view_style(&self, selector: String) -> Result<Option<ViewStyle>, JsError> {
+        self.with(|app| app.view_style(&selector).map(|s| s.map(ViewStyle::from)))
     }
 
     /// What the app's storage holds now.
@@ -2431,6 +2467,17 @@ impl App {
         step(&this, move |app| app.fail_images(&url)).await
     }
 
+    /// The URLs the app opens that match `url` fail to open from now on:
+    /// `openUrl` resolves `{ opened: false }`, as on a device with no app
+    /// for the URL, so a test checks what the app shows then. `url` is
+    /// matched whole and `*` in it matches anything
+    /// (`"https://example.com/*"`), as `open`'s `network` routes are. They
+    /// are still listed by `openedUrls`. Then waits until the app is
+    /// quiet. Headless only.
+    pub async fn fail_open_urls(this: Instance<Self>, url: String) -> Result<(), JsError> {
+        step(&this, move |app| app.fail_open_urls(&url)).await
+    }
+
     /// Moves the app to `state`, as the system does when the user leaves it
     /// (`"background"`), switches to another app or window (`"inactive"`)
     /// and comes back (`"active"`); `lifecycle()` follows. Headless only.
@@ -2461,6 +2508,13 @@ impl App {
     /// The text on the clipboard now, `null` when it holds none.
     pub fn clipboard(&self) -> Result<Option<String>, JsError> {
         self.with(|app| app.clipboard())
+    }
+
+    /// The item on the clipboard now, `{ text, html? }` (`Clipboard.write`;
+    /// text alone has no `html`), `null` when it holds none. Headless tests
+    /// only.
+    pub fn clipboard_item(&self) -> Result<Option<ClipboardItem>, JsError> {
+        self.with(|app| app.clipboard_item())
     }
 
     /// `f` with the app as it is now (the batches that came applied); a

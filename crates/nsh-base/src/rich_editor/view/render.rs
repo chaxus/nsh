@@ -135,6 +135,7 @@ fn content(rv: Rv) -> impl IntoElement {
     let (down, tap, mov, up, end) = (rv.clone(), rv.clone(), rv.clone(), rv.clone(), rv.clone());
     let (long, lift, armed, sweep) = (rv.clone(), rv.clone(), rv.clone(), rv.clone());
     let over = rv.clone();
+    let claim = rv.clone();
     let placed = rv.clone();
     let height = rv.content_height;
     part(
@@ -152,7 +153,8 @@ fn content(rv: Rv) -> impl IntoElement {
     )
     .on(EventKind::PressDown, move |p: &EventPayload| {
         match (desktop, p) {
-            (true, EventPayload::Press(e)) => {
+            // A checkbox's press is its own: the caret stays where it is.
+            (true, EventPayload::Press(e)) if !down.on_checkbox(e.position) => {
                 down.press(e.position, e.page_position, e.modifiers, e.clicks.max(1))
             }
             (false, _) => down.touch_down(),
@@ -185,8 +187,15 @@ fn content(rv: Rv) -> impl IntoElement {
     })
     // The mouse selects as it drags; a finger scrolls, unless a long press
     // armed its sweep, which selects by words.
+    // Not from a task's checkbox: a responder granted after the pointer
+    // moved takes the press from the view under it, and a hand moves as it
+    // clicks, so the checkbox would miss presses.
     .claim_touches(TouchClaim::on_start().ask(move |request: &ClaimRequest| {
-        if desktop {
+        let page = request.event.page;
+        let on_checkbox = claim
+            .page_shift()
+            .is_some_and(|shift| claim.on_checkbox(Point::new(page.x + shift.x, page.y + shift.y)));
+        if desktop && !on_checkbox {
             request.claim();
         }
     }))
@@ -213,7 +222,6 @@ fn content(rv: Rv) -> impl IntoElement {
         true => end.release(),
         false => end.end_sweep(),
     })
-    .child(selection_rects(rv.clone()))
     .child(blocks(rv.clone(), DOC))
     .child(table::controls(rv.clone()))
     .child(gap_cursor(rv.clone()))
@@ -221,7 +229,25 @@ fn content(rv: Rv) -> impl IntoElement {
     .child(caret(rv.clone()))
     // The touch selection's handles take touches of their own.
     .child(super::touch::handles(rv.clone()))
+    .child(content_layer(rv.clone()))
     .children(bubble_menu(rv))
+}
+
+/// The app's layer over the document (`contentLayer`): a box over the
+/// whole content box, after everything the editor draws, so it scrolls
+/// with the text. The box takes no press; what the app puts in it does.
+fn content_layer(rv: Rv) -> impl IntoElement {
+    let props = rv.props;
+    when(
+        move || props.content_layer.get().is_some(),
+        move || {
+            view()
+                .absolute()
+                .inset(px(0.0))
+                .pointer_events(PointerEvents::BoxNone)
+                .child(props.content_layer.place(|slot| slot))
+        },
+    )
 }
 
 /// The app's bubble menu: an overlay against an empty box over the
@@ -997,6 +1023,12 @@ fn text_block(rv: Rv, item: ReadSignal<BlockItem>, owner: u64) -> impl IntoEleme
             |n| inline_rv.leaf_text(n),
         );
         if let Some(geo) = inline_rv.geo.borrow_mut().texts.get_mut(&id) {
+            // Its views moved within it: they report their widths anew.
+            // A move of the whole block (an edit in another) keeps them;
+            // its spans are not drawn again.
+            if geo.map != inline.map {
+                geo.widths.clear();
+            }
             geo.map = inline.map.clone();
         }
         inline
@@ -1006,9 +1038,9 @@ fn text_block(rv: Rv, item: ReadSignal<BlockItem>, owner: u64) -> impl IntoEleme
         let it = item.get();
         placeholder_text(&ph_rv, &it)
     });
-    let (frame_rv, lines_rv, spans_rv) = (rv.clone(), rv.clone(), rv);
-    text("")
-        .on_layout(move |b: &Bounds<Points>| frame_rv.set_text_frame(id, owner, *b))
+    let (frame_rv, lines_rv, spans_rv, sel_rv) = (rv.clone(), rv.clone(), rv.clone(), rv);
+    // The text's box: its selection boxes, then the text over them.
+    let text = text("")
         .on(EventKind::TextLayout, move |p: &EventPayload| {
             if let EventPayload::TextLayout(lines) = p {
                 lines_rv.set_lines(id, lines.clone());
@@ -1016,8 +1048,7 @@ fn text_block(rv: Rv, item: ReadSignal<BlockItem>, owner: u64) -> impl IntoEleme
         })
         .child(dynamic(move || {
             let inline = content.get();
-            let start = item.get_untracked().pos + 1;
-            let mut list = spans(&spans_rv, inline.pieces.clone(), start);
+            let mut list = spans(&spans_rv, inline.pieces.clone(), id, item);
             if inline.pieces == [Piece::Filler]
                 && let Some(label) = placeholder.get()
             {
@@ -1031,7 +1062,12 @@ fn text_block(rv: Rv, item: ReadSignal<BlockItem>, owner: u64) -> impl IntoEleme
                 );
             }
             list
-        }))
+        }));
+    view()
+        .relative()
+        .on_layout(move |b: &Bounds<Points>| frame_rv.set_text_frame(id, owner, *b))
+        .child(selection_rects(sel_rv, id))
+        .child(text)
 }
 
 /// The placeholder of an empty textblock that shows one (Tiptap's
@@ -1089,9 +1125,12 @@ fn placeholder_text(rv: &Rv, it: &BlockItem) -> Option<String> {
     Some(label)
 }
 
-/// The spans of a textblock's pieces.
-fn spans(rv: &Rv, pieces: Vec<Piece>, start: usize) -> Vec<AnyElement> {
+/// The spans of a textblock's pieces (textblock `id`, `item`).
+fn spans(rv: &Rv, pieces: Vec<Piece>, id: u64, item: ReadSignal<BlockItem>) -> Vec<AnyElement> {
     let props = rv.props;
+    // Inline leaves by their order in the block: a node view's key that
+    // typing before it does not change.
+    let mut leaves = 0usize;
     pieces
         .into_iter()
         .map(|piece| match piece {
@@ -1147,7 +1186,11 @@ fn spans(rv: &Rv, pieces: Vec<Piece>, start: usize) -> Vec<AnyElement> {
                     .when_some(hint, |t, hint| t.child(hint))
                     .into_element()
             }
-            Piece::Leaf { node, offset, text } => leaf(rv, node, start + offset, text),
+            Piece::Leaf { node, offset, text } => {
+                leaves += 1;
+                let key = SharedString::from(format!("i{id}.{leaves}"));
+                leaf(rv, node, (id, offset), item, text, key)
+            }
             Piece::Widget { class } => view()
                 .app_class(class.map(SharedString::from))
                 .into_element(),
@@ -1173,10 +1216,27 @@ fn link_destination(marks: &[Mark]) -> Option<(SharedString, Option<SharedString
     Some((attr("href")?, attr("title")))
 }
 
+/// The box of an inline view or image at `offset` in textblock `id`'s
+/// content: it reports its width, which its attachment character stands
+/// for when the geometry places the caret and finds the position at a
+/// point.
+fn inline_box(rv: &Rv, el: View, (id, offset): (u64, usize)) -> View {
+    let width_rv = rv.clone();
+    el.on_layout(move |b: &Bounds<Points>| width_rv.set_inline_width(id, offset, b.size.width))
+}
+
 /// An inline leaf: its one-character text (a line break), its node view,
 /// the text it is drawn as (`drawn`, [`Rv::leaf_text`]), else a box of its
-/// part.
-fn leaf(rv: &Rv, node: Node, pos: usize, drawn: Option<String>) -> AnyElement {
+/// part. Its position is its textblock's current one plus its offset: an
+/// edit in a block before it moves it without drawing it again.
+fn leaf(
+    rv: &Rv,
+    node: Node,
+    at: (u64, usize),
+    item: ReadSignal<BlockItem>,
+    drawn: Option<String>,
+    key: SharedString,
+) -> AnyElement {
     let props = rv.props;
     let classes_node = node.clone();
     let styled = move |el: View| {
@@ -1194,21 +1254,43 @@ fn leaf(rv: &Rv, node: Node, pos: usize, drawn: Option<String>) -> AnyElement {
         })
     };
     if let Some(view) = rv.node_view(node.ty().name()) {
-        let get_pos: Rc<dyn Fn() -> Option<usize>> = Rc::new(move || Some(pos));
+        let offset = at.1;
+        let live = Rc::new(Cell::new(true));
+        let get_pos: Rc<dyn Fn() -> Option<usize>> = {
+            let live = live.clone();
+            Rc::new(move || live.get().then(|| item.get_untracked().pos + 1 + offset))
+        };
+        let selected = signal(false);
+        {
+            let rv = rv.clone();
+            effect(move || {
+                rv.sel_rev.get();
+                let pos = item.get().pos + 1 + offset;
+                let state = rv.st.borrow();
+                let sel = state.selection();
+                selected.set(sel.as_node().is_some() && sel.from() == pos);
+            });
+        }
+        cleanup(move || live.set(false));
         let cx = NodeViewCx::new(
             rv.session.clone(),
             get_pos,
             signal(node.clone()).read_only(),
-            signal(false).read_only(),
+            selected.read_only(),
             signal(Vec::new()).read_only(),
             None,
-        );
+        )
+        .rendered_at(rv.cx.__host(), key, item);
         let el = view.create(&cx, &node);
         cleanup(move || view.destroy());
-        return styled(view_box()).child(el).into_element();
+        return inline_box(rv, styled(view_box()), at)
+            .child(el)
+            .into_element();
     }
     if render_kind(&node) == Some("image") {
-        return styled(view_box()).child(image_of(&node)).into_element();
+        return inline_box(rv, styled(view_box()), at)
+            .child(image_of(&node))
+            .into_element();
     }
     if let Some(drawn) = drawn {
         let (class_node, style_node) = (node.clone(), node);
@@ -1300,7 +1382,8 @@ fn node_view_block(rv: Rv, item: ReadSignal<BlockItem>, view: Arc<dyn NodeView>)
                 selected.read_only(),
                 decorations.read_only(),
                 content,
-            );
+            )
+            .rendered_at(rv.cx.__host(), SharedString::from(format!("b{id}")), item);
             let el = view.create(&cx, &current);
             let destroyed = view.clone();
             cleanup(move || destroyed.destroy());
@@ -1337,8 +1420,11 @@ fn slot(rv: Rv, item: ReadSignal<BlockItem>, id: u64, node: &Node) -> AnyElement
         .into_element()
 }
 
-/// The selection's boxes.
-fn selection_rects(rv: Rv) -> impl IntoElement {
+/// The selection's boxes in textblock `id`, in its text's box. Drawn in
+/// the block, under its text and over its background: a block with a
+/// background of its own (a code block) would hide boxes drawn under all
+/// the blocks.
+fn selection_rects(rv: Rv, id: u64) -> impl IntoElement {
     dynamic(move || {
         rv.sel_rev.get();
         rv.layout_rev.get();
@@ -1353,7 +1439,7 @@ fn selection_rects(rv: Rv) -> impl IntoElement {
         if from == to || !text {
             return Vec::new();
         }
-        let rects = rv.geo.borrow().range_rects(from, to);
+        let rects = rv.geo.borrow().text_range_rects(id, from, to);
         rects
             .into_iter()
             .map(|b| {
@@ -1588,6 +1674,31 @@ impl Rv {
         geo.frames.insert(id, (parent, frame));
         drop(geo);
         self.layout_rev.update(|r| *r += 1);
+    }
+
+    /// The width of the inline view or image at `offset` in textblock
+    /// `id`'s content (see `TextGeo::widths`).
+    fn set_inline_width(&self, id: u64, offset: usize, width: Points) {
+        let mut geo = self.geo.borrow_mut();
+        let Some(text) = geo.texts.get_mut(&id) else {
+            return;
+        };
+        if text.widths.get(&offset) == Some(&width) {
+            return;
+        }
+        text.widths.insert(offset, width);
+        drop(geo);
+        // Every inline view of a block reports its width as an edit before
+        // them moves them (their offsets are new): the geometry follows once
+        // for all of them, not once per view.
+        if self.widths_pending.replace(true) {
+            return;
+        }
+        let (pending, layout_rev) = (self.widths_pending.clone(), self.layout_rev);
+        spawn(async move {
+            pending.set(false);
+            layout_rev.update(|r| *r += 1);
+        });
     }
 
     /// Where block `id`'s children start in its box (see

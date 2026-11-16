@@ -506,14 +506,20 @@ impl CoreTextEngine {
         let string =
             CFMutableAttributedString::new(None, 0).expect("CFAttributedStringCreateMutable");
         let s = Some(&*string);
-        // SAFETY: valid mutable string and range.
-        unsafe {
-            CFMutableAttributedString::replace_string(
-                s,
-                WHOLE,
-                Some(&CFString::from_str(&text.text)),
-            )
+        // CFString's UTF-8 decoder consumes a leading BOM, even when the
+        // input is not an external representation. Keep it as a character:
+        // the spans and attachments count it in their UTF-16 offsets.
+        let content = if text.text.starts_with('\u{feff}') {
+            let utf16: Vec<u16> = text.text.encode_utf16().collect();
+            // SAFETY: a live buffer of exactly `utf16.len()` UTF-16 units;
+            // CFStringCreateWithCharacters copies it.
+            unsafe { CFString::with_characters(None, utf16.as_ptr(), utf16.len() as CFIndex) }
+                .expect("CFStringCreateWithCharacters")
+        } else {
+            CFString::from_str(&text.text)
         };
+        // SAFETY: valid mutable string and range.
+        unsafe { CFMutableAttributedString::replace_string(s, WHOLE, Some(&content)) };
         let length = text.spans.last().map_or(0, |span| span.end as CFIndex);
         CFMutableAttributedString::begin_editing(s);
         let set = |range: CFRange, key: &CFString, value: &CFType| {
@@ -1298,9 +1304,10 @@ pub(crate) struct DrawnText {
     pub(crate) layout: TextLayout,
     /// The content box in the view (inside padding and borders).
     pub(crate) content: nsh_core::Bounds<nsh_core::Points>,
-    /// It was last drawn in a layer narrower than its box (a view waiting
-    /// to be placed, `Mounter::unplaced`): its picture misses what passes
-    /// that layer, so it draws again once placed.
+    /// It was last drawn in a layer smaller than its box (a view waiting
+    /// to be placed, `Mounter::unplaced`, or animating up from a smaller
+    /// `LayoutAnimation` frame): its picture misses what passes that
+    /// layer, so it draws again as it grows.
     pub(crate) cut: std::cell::Cell<bool>,
     /// The selection of selectable text, kept across new content.
     selection: Option<Selection>,
@@ -1526,8 +1533,10 @@ pub(crate) fn selectable(state: &crate::view::ViewState) -> bool {
 }
 
 /// Draws a text view's text (in its content layer's `drawLayer:inContext:`;
-/// the context is y down).
-pub(crate) fn draw(cx: &CGContext, state: &crate::view::ViewState) {
+/// the context is y down). `layer` is that layer's size, which says whether
+/// the picture holds all of the text; the context's clip does not, as a
+/// redraw of a few recolored lines ([`damage`]) clips to them.
+pub(crate) fn draw(cx: &CGContext, state: &crate::view::ViewState, layer: CGSize) {
     use objc2_core_foundation::CGAffineTransform;
     let Some(drawn) = &state.text else { return };
     let Some(text) = drawn.layout.downcast::<CoreTextLayout>() else {
@@ -1535,10 +1544,13 @@ pub(crate) fn draw(cx: &CGContext, state: &crate::view::ViewState) {
     };
     let content = drawn.content;
     let c = Some(cx);
-    let drawn_width = CGContext::clip_bounding_box(c).size.width;
-    drawn
-        .cut
-        .set(drawn_width < (content.origin.x.0 + content.size.width.0) as CGFloat);
+    // A layer on its way to the box's size (a `LayoutAnimation`'s frames)
+    // counts as smaller even where its picture, in whole pixels, reaches
+    // the box: the text is drawn again at the size it stays at.
+    drawn.cut.set(
+        layer.width < (content.origin.x.0 + content.size.width.0) as CGFloat
+            || layer.height < (content.origin.y.0 + content.size.height.0) as CGFloat,
+    );
     CGContext::save_g_state(c);
     if drawn.text.has_backgrounds() {
         draw_backgrounds(cx, &drawn.text, text, content);
@@ -2402,12 +2414,13 @@ pub(crate) fn selection_text(surface: &crate::surface::Surface) -> Option<String
 /// (with a selection), Select All and, for selected text, Look Up, titled
 /// in AppKit's own words ([`appkit_title`]). The root view is a Services
 /// requestor for the selection (`validRequestorForSendType:returnType:`),
-/// available to AppKit Services. Context-menu plugins are enabled by
+/// available to AppKit Services. The items of the selectable view `area`'s
+/// `selectionMenu` follow, after a separator. Context-menu plugins are enabled by
 /// default; their presentation depends on AppKit. Translate is not
 /// offered: `NSTextView`'s comes from a private framework, and the public
 /// translation UI is SwiftUI's only (`translationPresentation`). Returns
 /// once the menu closed.
-pub(crate) fn context_menu(surface: &crate::surface::Surface) {
+pub(crate) fn context_menu(surface: &crate::surface::Surface, area: Option<&crate::view::NshView>) {
     use nsh_core::desktop::MenuRole;
     use objc2::{MainThreadMarker, MainThreadOnly, sel};
     use objc2_app_kit::{NSApplication, NSMenu, NSMenuItem, NSPasteboardTypeString};
@@ -2463,7 +2476,21 @@ pub(crate) fn context_menu(surface: &crate::surface::Surface) {
         unsafe { item.setTarget(Some(root.ns())) };
         menu.addItem(&item);
     }
+    // The app's items (`selectionMenu`), built as its menus are: chosen,
+    // each reports its id as the root's `Menu` event.
+    let items = area.map(|a| a.state().props.selection_menu.clone());
+    let mut loads = Vec::new();
+    if let Some(items) = items.filter(|items| !items.is_empty()) {
+        let app = crate::chrome::menu(surface, "", &items, &mut loads);
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+        for item in app.itemArray().iter() {
+            app.removeItem(&item);
+            menu.addItem(&item);
+        }
+    }
+    // Returns once the menu closed.
     NSMenu::popUpContextMenu_withEvent_forView(&menu, &event, root.ns());
+    drop(loads);
 }
 
 /// The characters of a selection a Look Up title quotes, as many as
@@ -2995,6 +3022,49 @@ mod tests {
 
     use super::CoreTextEngine;
 
+    #[test]
+    fn measurement_preserves_a_leading_bom() {
+        let engine = CoreTextEngine::default();
+        for content in [
+            "",
+            "Hello",
+            "\u{feff}",
+            "\u{feff}Hello",
+            "\u{feff}中文 👩‍💻",
+            "\u{feff}\u{feff}text",
+        ] {
+            let mut text = AttributedText::default();
+            text.push(content, ResolvedTextStyle::default());
+            text.push(
+                " tail",
+                ResolvedTextStyle {
+                    font_weight: 700,
+                    ..Default::default()
+                },
+            );
+            text.push_attachment(
+                Size::new(Points(12.0), Points(10.0)),
+                ResolvedTextStyle::default(),
+            );
+            let string = engine.attributed_string(&text, &Default::default());
+            assert_eq!(
+                super::CFAttributedString::length(&string) as usize,
+                text.text.encode_utf16().count()
+            );
+            assert_eq!(
+                super::CFAttributedString::string(&string)
+                    .unwrap()
+                    .to_string(),
+                text.text
+            );
+            let prepared = engine.prepare(&text);
+            let size = engine.measure(&prepared, Some(Points(320.0)));
+            assert!(size.width.0.is_finite() && size.height.0 > 0.0);
+            let layout = engine.layout(&prepared, size);
+            assert!(!engine.lines(&layout).is_empty());
+        }
+    }
+
     /// A `fontFamily` list sets text in the first family the Mac has, the
     /// others it has its fallbacks for characters the first lacks; a list
     /// of families it has none of is the system font.
@@ -3393,6 +3463,94 @@ mod tests {
             assert!(top >= lines[0].y.0 + lines[0].height.0 - 0.5, "{chip}");
             assert!(top + chip <= lines[2].y.0 + 0.5, "{chip}");
         }
+    }
+
+    /// A text drawn while its content layer is still at an earlier, smaller
+    /// frame (such as at the start of a `LayoutAnimation` that grows its
+    /// height) records `cut`, and clears it once drawn in a layer that
+    /// covers its whole content box.
+    #[test]
+    fn drawing_in_a_shorter_or_narrower_layer_marks_the_text_cut() {
+        use std::{cell::Cell, sync::Arc};
+
+        use nsh_core::{Bounds, Point, ViewKind};
+        use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
+        use objc2_core_graphics::{
+            CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo, CGImageByteOrderInfo,
+            kCGColorSpaceSRGB,
+        };
+
+        let engine = CoreTextEngine::default();
+        let mut text = AttributedText::default();
+        text.push(
+            "Line one\nLine two\nLine three\nLine four",
+            ResolvedTextStyle {
+                font_size: Points(16.0),
+                line_height: Points(22.0),
+                ..ResolvedTextStyle::default()
+            },
+        );
+        let text = Arc::new(text);
+        let prepared = engine.prepare(&text);
+        let size = engine.measure(&prepared, Some(Points(200.0)));
+        let layout = engine.layout(&prepared, size);
+        let mut state = crate::view::ViewState::new(1, ViewKind::Text);
+        state.text = Some(super::DrawnText {
+            text,
+            layout,
+            content: Bounds::new(Point::default(), size),
+            cut: Cell::new(false),
+            selection: None,
+            area_range: Cell::new(None),
+        });
+
+        // Draws in a layer of `w` by `h`; `dirty` is the height a partial
+        // redraw (`setNeedsDisplayInRect`) clips to.
+        let draw_at = |w: usize, h: usize, dirty: Option<CGFloat>| {
+            // SAFETY: CoreGraphics allocates and owns the backing buffer.
+            let cx = unsafe {
+                let space = CGColorSpace::with_name(Some(kCGColorSpaceSRGB)).expect("sRGB");
+                CGBitmapContextCreate(
+                    std::ptr::null_mut(),
+                    w,
+                    h,
+                    8,
+                    w * 4,
+                    Some(&space),
+                    CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0,
+                )
+            }
+            .expect("a bitmap context");
+            CGContext::translate_ctm(Some(&cx), 0.0, h as CGFloat);
+            CGContext::scale_ctm(Some(&cx), 1.0, -1.0);
+            if let Some(dirty) = dirty {
+                let part = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(w as CGFloat, dirty));
+                CGContext::clip_to_rect(Some(&cx), part);
+            }
+            super::draw(&cx, &state, CGSize::new(w as CGFloat, h as CGFloat));
+            state.text.as_ref().unwrap().cut.get()
+        };
+
+        let full_w = size.width.0.ceil() as usize;
+        let full_h = size.height.0.ceil() as usize;
+        assert!(
+            draw_at(full_w, full_h / 2, None),
+            "shorter layer cuts the text"
+        );
+        assert!(
+            draw_at(full_w / 2, full_h, None),
+            "narrower layer cuts the text"
+        );
+        assert!(
+            !draw_at(full_w, full_h, None),
+            "full layer clears the cut mark"
+        );
+        // One recolored line drawn again in a layer that holds all of the
+        // text: the picture still covers it (`damage` stays partial).
+        assert!(
+            !draw_at(full_w, full_h, Some(22.0)),
+            "a partial redraw of a whole picture cuts nothing"
+        );
     }
 }
 

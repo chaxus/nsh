@@ -5,6 +5,7 @@
 #![cfg(any(target_os = "macos", target_os = "ios"))]
 
 pub mod audio;
+pub mod canvas_image;
 pub mod notifications;
 pub mod speech;
 pub mod stream;
@@ -13,5 +14,9 @@ mod stream_audio;
 // hidden from the docs, so it stays out of what NSH keeps compatible.
 #[doc(hidden)]
 pub mod unified_log;
+// The `WKDownload` transport iOS and macOS share, no API of apps': hidden
+// from the docs, so it stays out of what NSH keeps compatible.
+#[doc(hidden)]
+pub mod web_download;
 pub mod web_evaluation;
 pub mod web_scheme;

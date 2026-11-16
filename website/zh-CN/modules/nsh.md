@@ -522,7 +522,7 @@ class AnimatedNode {
     extrapolateRight?: Extrapolation;
     easing?: Easing;
   }): AnimatedNode;
-  diffClamp(min: number, max: number, options?: { snap?: boolean }): AnimatedNode;
+  diffClamp(min: number | AnimatedNode, max: number | AnimatedNode, options?: { snap?: boolean }): AnimatedNode;
   add(b: AnimatedNode | number): AnimatedNode;
   sub(b: AnimatedNode | number): AnimatedNode;
   mul(b: AnimatedNode | number): AnimatedNode;
@@ -538,7 +538,7 @@ type Extrapolation = "extend" | "clamp" | "identity";
 | 方法 | Rust | 说明 |
 |---|---|---|
 | `interpolate(config)` | `interpolate(&input, &output)`、`interpolate_colors(&input, &colors)`、`interpolate_with(&input, output, Interpolation { … })` | 按分段区间映射输入。`outputRange` 可以是数字、颜色（`"#ff0000"`、`"rgba(…)"`）或角度（`"45deg"`、`"1rad"`）。超出 `inputRange` 时默认钳制（clamp）；`extrapolate`（或 `extrapolateLeft` / `extrapolateRight`）可以是 `"extend"`（沿直线延伸）、`"clamp"` 或 `"identity"`（直接输出输入值）。`easing` 决定每一段的曲线。Rust 接受数字、主题颜色（跟随外观）以及供 `bind_rotate` 使用的角度（度）。 |
-| `diffClamp(min, max, options?)` | `diff_clamp(min, max)`、`diff_clamp_with(min, max, DiffClamp::snapping())` | 跟随输入的变化量，但把结果限制在 `min..max` 内：内容向上滚动时隐藏、一旦向下滚动就重新出现的标题栏。`snap: true` 让它在滚动视图停下时用 200 ms 停到较近的一端；只有输入达到 `max` 后才会停在 `max`。 |
+| `diffClamp(min, max, options?)` | `diff_clamp(min, max)`、`diff_clamp_with(min, max, DiffClamp::snapping())` | 跟随输入的变化量，但把结果限制在 `min..max` 内：内容向上滚动时隐藏、一旦向下滚动就重新出现的标题栏。`snap: true` 让它在滚动视图停下时用 200 ms 停到较近的一端；只有输入达到 `max` 后才会停在 `max`。上下限可以是数字或动画值。 |
 | `add`、`sub`、`mul`、`div` | `add`、`sub`、`mul`、`div` | 与另一个节点或常量做算术运算。 |
 | `mod(b)` | `modulo(b)` | 取模，`b` 为正时结果不会为负（比如把角度保持在 0..360）。 |
 
@@ -946,6 +946,24 @@ const wide = () => windowSize().width >= 600;
 <View style={{ flexDirection: wide() ? "row" : "column" }}>{/* ... */}</View>
 ```
 
+### horizontalSizeClass / verticalSizeClass
+
+```ts
+export type SizeClass = "compact" | "regular";
+const horizontalSizeClass: Accessor<SizeClass>;
+const verticalSizeClass: Accessor<SizeClass>;
+```
+
+读取窗口横向和纵向可用空间的响应式分类。iOS 使用当前视图的 UIKit trait collection，随旋转和分屏变化；系统尚未提供分类时按窗口尺寸回退。其他平台（含桌面、Android 和 Web）分别按窗口的宽、高判断：小于 600pt 为 `compact`，600pt 及以上为 `regular`。横向阈值与 DockArea 一致；Android 的点对应 dp，Web 对应 CSS 像素。分类变化时才通知读取者。
+
+Rust：`horizontal_size_class()` / `vertical_size_class()` 返回 `SizeClass::Compact` 或 `SizeClass::Regular`，由 `nsh_core::prelude` 导出。
+
+```tsx
+import { horizontalSizeClass, Text } from "nsh";
+
+<Text>{horizontalSizeClass() === "compact" ? "Compact layout" : "Expanded layout"}</Text>
+```
+
 ### colorScheme
 
 ```ts
@@ -1076,6 +1094,34 @@ function setFpsEnabled(enabled: boolean): void;
 <Switch checked={fpsEnabled()} onChange={({ checked }) => setFpsEnabled(checked)} />
 ```
 
+### setFpsMode
+
+```ts
+function setFpsMode(mode: "expanded" | "collapsed" | "hidden"): void;
+```
+
+性能监视器的显示方式，立即生效，之后再显示时也照此显示：`"expanded"`，完整的面板（默认）；`"collapsed"`，只显示帧率的小药丸，颜色按帧预算区分；`"hidden"`，屏幕上不显示任何东西，但照常测量并记录日志。点击面板会在前两种之间切换。macOS 的面板支持它（见 [macOS](../docs/macos.md#性能监视器)）；没有面板的平台忽略它，Linux 的面板点击可以收起，但暂不支持这个设置。`NSH_FPS=collapsed` 或 `NSH_FPS=hidden` 让监视器以这种方式启动。Rust：`set_fps_mode(FpsMode::Collapsed)`。
+
+### perfStats
+
+```ts
+const perfStats: Accessor<PerfStats | null>;
+
+interface PerfStats {
+  readonly fps: number;
+  readonly refreshRate: number | null;
+  readonly dropped: number;
+}
+```
+
+监视器最近一秒测得的数据：监视器测量时（`fpsEnabled()`）每秒读一次，不测量时以及测满第一秒之前为 `null`，应用可以按自己的样式显示它。`fps` 是每秒显示的帧数：空闲的应用读数偏低，这不代表慢（只有应用有变化的屏幕刷新才计数）。`refreshRate` 是屏幕的刷新率（Hz），监视器见到刷新之前为 `null`；`dropped` 是最近的帧里耗时超过一次刷新的比例，0 到 1（`0.05` 即 5%；Rust 中是 `Percentage`，同样是这个比例）。无头测试也会测量，但不绘制帧，读数为 0 fps。Rust：`perf_stats() -> Option<PerfStats>`。
+
+```tsx
+<If when={perfStats()}>
+  <Text>{`${Math.round(perfStats()!.fps)} FPS`}</Text>
+</If>
+```
+
 ### shadersAvailable
 
 ```ts
@@ -1138,10 +1184,11 @@ interface PlatformSelectSpec<T> {
   desktop?: T;  // platform.desktop 为 true：macOS、Windows、Linux、桌面浏览器，以及终端
   native?: T;   // 除 Web 外的所有平台
   default?: T;
+  [platform: string]: T | undefined; // 在 NSH 之外构建的平台，按其 platform.name 匹配
 }
 ```
 
-依次返回当前操作系统（`ios`、`android`、`web` 等）对应的值，否则按 `platform.desktop` 取 `desktop` 或 `mobile`，否则 `native`（除 Web 外的所有平台），否则 `default`，都没有则返回 `undefined`。Rust 代码对 `os()` 做 `match`（`mobile` / `desktop` 用 `is_desktop()`）。
+依次返回 `platform.name`（在 NSH 之外构建的平台）对应的值，否则当前操作系统（`ios`、`android`、`web` 等）对应的值，否则按 `platform.desktop` 取 `desktop` 或 `mobile`，否则 `native`（除 Web 外的所有平台），否则 `default`，都没有则返回 `undefined`。Rust 代码对 `os()` 做 `match`（配合 `platform_name()` 和 `is_desktop()`）。
 
 ```rust tabs
 use nsh_core::platform::Os;
@@ -1450,6 +1497,7 @@ import { Clipboard } from "nsh";
 ```ts
 const Clipboard: {
   writeText(text: string): Promise<void>;
+  write(item: ClipboardItem): Promise<void>;
   readText(): Promise<string>;
   hasText(): Promise<boolean>;
   writeImage(src: string): Promise<void>;
@@ -1457,6 +1505,11 @@ const Clipboard: {
   hasImage(): Promise<boolean>;
   readFiles(): Promise<string[]>;
 };
+
+interface ClipboardItem {
+  text: string; // 纯文本形式的内容
+  html?: string; // 同一内容的 HTML 形式
+}
 
 interface ClipboardImage {
   url: string; // Image 能显示、fetch 能读取的 URL
@@ -1467,6 +1520,7 @@ interface ClipboardImage {
 | TS | Rust（`nsh_core::prelude`） |
 |---|---|
 | `await Clipboard.writeText(text)` | `set_clipboard(text)` |
+| `await Clipboard.write({ text, html })` | `set_clipboard_item(item)`（一个 `ClipboardItem`） |
 | `await Clipboard.readText()` | `clipboard_string().await -> String` |
 | `await Clipboard.hasText()` | `clipboard_has_string().await -> bool` |
 | `await Clipboard.writeImage(src)` | `set_clipboard_image(src)` |
@@ -1519,6 +1573,39 @@ const copied = signal(false);
 >
   <Text>{copied() ? "已复制" : "复制"}</Text>
 </View>;
+```
+
+### Clipboard.write
+
+```ts
+write(item: ClipboardItem): Promise<void>;
+```
+
+把同一内容的纯文本和 HTML 一起放到剪贴板上，替换原有内容，和浏览器复制选区的做法一样：能读格式的应用（邮件、文档、富文本编辑器）
+粘贴 HTML，其他应用粘贴文本。`html` 是一个片段（`<p>Hello <b>world</b></p>`），不是整个页面。不给 `html` 时等同于
+`writeText(text)`。Rust：`set_clipboard_item(item)`，参数是一个 `ClipboardItem`。
+
+`ClipboardItem` 是剪贴板上的一项内容，带有几种格式，和 GPUI 的 `ClipboardItem` 一样；在 NSH 中它是一个列出各格式的普通对象
+`{ text, html? }`，只是一个类型（浏览器的 `ClipboardItem` 类仍归页面所用）。一项内容的所有格式在一次写入中放上剪贴板，剪贴板以后支持的格式也加入同一项。
+
+HTML 以各平台的 HTML 类型和文本在同一次写入中放上剪贴板：Web 和 Linux 是 `text/html`，macOS 和 iOS 是 `public.html`，
+Android 是 HTML 剪贴项，Windows 是 `HTML Format`。GPUI 和终端写入文本。在 Web 上，处理用户按键或按下时发起的写入（例如
+`RichEditor` 的复制）经由页面的 copy 事件完成，和浏览器复制选区一样。`Clipboard.readText` 读回的是文本；HTML 由粘贴读取
+（`onPaste` 的 `html`）。
+
+```rust tabs
+use nsh_core::prelude::*;
+
+let mut item = ClipboardItem::default();
+item.text = "Hello world".into();
+item.html = Some("<p>Hello <b>world</b></p>".into());
+set_clipboard_item(item);
+```
+
+```tsx tabs
+import { Clipboard } from "nsh";
+
+await Clipboard.write({ text: "Hello world", html: "<p>Hello <b>world</b></p>" });
 ```
 
 ### Clipboard.readText
@@ -1949,7 +2036,7 @@ async function notifyMe() {
 }
 ```
 
-Rust 代码使用 `nsh_core::prelude` 的 `request_notification_permission`、`show_notification`、`close_notification`、`set_badge` 和 `next_notification_press`。
+Rust 代码使用 `nsh_core::prelude` 的 `request_notification_permission`、`show_notification`、`close_notification`、`close_all_notifications`、`set_badge` 和 `next_notification_press`。
 
 | 平台 | 通知 | 角标 |
 | --- | --- | --- |
@@ -1969,6 +2056,17 @@ Rust 代码使用 `nsh_core::prelude` 的 `request_notification_permission`、`s
 
 ```tsx
 await Notifications.show({ id: "sync", title: "Synced", body: "12 new photos", silent: true });
+```
+
+### Notifications.closeAll
+
+`closeAll()` 移除应用显示的全部通知，包括已显示的和等待显示的。在用户退出登录时调用，让通知里的内容随账号一起清掉。Apple 平台、Windows 和 Android 的系统通知中心会跨运行保留通知，`closeAll()` 在这些平台上移除 NSH 显示的通知，包括应用上一次运行留下的，嵌入方自己的通知保留。Linux 和 Web 上它移除当前运行的应用显示的通知。
+
+```tsx
+async function signOut() {
+  await Notifications.closeAll();
+  Notifications.setBadge(0);
+}
 ```
 
 ### Notifications.on
@@ -2716,13 +2814,14 @@ interface KeyBindingOptions {
   when?: "always" | "notEditing";
   repeat?: boolean;
   passThrough?: boolean;
+  forFocus?: boolean;
 }
 ```
 
 | TS | Rust |
 |---|---|
 | `keymap.bind(keystroke, handler)` | `on_key(keystroke, handler)` |
-| `keymap.bind(keystroke, handler, { when, repeat, passThrough })` | `on_key_with(keystroke, KeyOptions { when, repeat, pass_through }, handler)`；`when` 是 `nsh_core::keymap::When`（`Auto`、`Always`、`NotEditing`） |
+| `keymap.bind(keystroke, handler, { when, repeat, passThrough, forFocus })` | `on_key_with(keystroke, KeyOptions { when, repeat, pass_through, for_focus }, handler)`；`when` 是 `nsh_core::keymap::When`（`Auto`、`Always`、`NotEditing`） |
 | `keymap.bind({ … })` | 每个按键组合一次 `on_key` |
 | `keymap.label(keystroke)` | `key_label(keystroke)` |
 
@@ -2895,6 +2994,22 @@ on_key_with("tab", KeyOptions { pass_through: true, ..KeyOptions::default() }, m
 ```tsx tabs
 keymap.bind("tab", close, { passThrough: true });
 ```
+
+键盘焦点在能按下的视图（有 `onPress`）上时，不带修饰键的回车或空格（可以带 Shift）会按下这个视图，应用里这两个键的其他绑定都让给它：对话框里代表主操作的回车，不会抢在用户移过去焦点的按钮之前执行。视图自己的回车或空格用 `forFocus: true` 绑定：在视图有焦点时绑上，它就在按下之前拿到这两个键。下面这个卡片按空格翻开关，按回车打开：
+
+```rust tabs
+on_key_with("space", KeyOptions { for_focus: true, ..KeyOptions::default() }, move |_| flip());
+```
+
+```tsx tabs
+<View
+  onPress={open}
+  onFocus={() => (unbind = keymap.bind("space", flip, { forFocus: true }))}
+  onBlur={() => unbind?.()}
+/>
+```
+
+按键归最新的对话框：焦点留在被对话框盖住的视图上时（菜单项打开对话框，菜单关闭时把焦点还给触发器），回车和空格交给对话框的绑定，这个视图的 `forFocus` 绑定和按下都要等对话框关闭后才生效。
 
 菜单快捷键会让位给相同按键组合的绑定：所有桌面平台上的应用菜单（[`nsh/desktop`](./nsh-desktop)），以及 macOS 上的内置菜单（Cmd+W、Cmd+C 等）。使用 `nsh run` 开发时，即使应用绑定了 `mod+r`，Cmd+R / Ctrl+R 也总是重新加载应用；打包后的应用可以绑定它。
 

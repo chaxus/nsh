@@ -89,6 +89,7 @@ fn start(name: &str) -> (Engine, Receiver<MountBatch>) {
         speech: None,
         audio: None,
         windows: None,
+        login_item: None,
     };
     (
         Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap(),
@@ -233,6 +234,7 @@ fn a_move_with_a_button_down_reaches_on_mouse_move_with_the_button() {
             EventPayload::Touch(Box::new(TouchEvent {
                 phase: TouchPhase::Move,
                 timestamp: x as f64,
+                modifiers: Default::default(),
                 activated: None,
                 points: vec![TouchPoint {
                     id: 1,

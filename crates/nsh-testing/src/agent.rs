@@ -27,7 +27,7 @@ use nsh_core::{
     MountBatch, NodeId,
     geometry::{Bounds, Point, Points, Size, point},
 };
-use nsh_dev::protocol::{PickTarget, SceneQuery, SpanStyle, StepOutcome, TestStep};
+use nsh_dev::protocol::{PickTarget, SceneQuery, SpanStyle, StepOutcome, TestStep, ViewStyle};
 
 mod forward;
 
@@ -85,8 +85,12 @@ fn unix_time(ms: f64) -> std::time::SystemTime {
 const CLOCK_TIMEOUT: Duration = Duration::from_secs(60);
 /// A long press's hold when the view does not say (`delayLongPress`).
 const LONG_PRESS: Duration = Duration::from_millis(500);
-/// How many gestures scrolling a view into view takes at most.
-const SCROLLS_INTO_VIEW: usize = 20;
+/// How many gestures scrolling a view into view takes at most: only a
+/// guard against a view that keeps moving without ever arriving. Gestures
+/// that move nothing end it sooner ([`anchor`]), and each moves at most
+/// part of its scroll view, so a row far down a long list in a small window
+/// (the gallery's home at 640x480 needs about 30) takes many.
+const SCROLLS_INTO_VIEW: usize = 100;
 
 /// What a host's app shows, as test steps see it: the batches the host
 /// applied and the errors the app reported.
@@ -460,6 +464,8 @@ pub trait Scene: Send + Sync {
     fn enabled(&self, selector: &str) -> Result<bool, String>;
     /// The resolved style of the first character `selector` names.
     fn span_style(&self, selector: &str) -> Result<SpanStyle, String>;
+    /// The style of the view `selector` names, `None` when none matches.
+    fn view_style(&self, selector: &str) -> Result<Option<ViewStyle>, String>;
     /// The input `selector` names.
     fn input_id(&self, selector: &str) -> Result<Option<NodeId>, String>;
     /// The dialogs the app showed.
@@ -608,6 +614,15 @@ impl Scene for Model {
         span.line_through = style.decoration.line_through;
         Ok(span)
     }
+    fn view_style(&self, selector: &str) -> Result<Option<ViewStyle>, String> {
+        Ok(self.lock().screen.view_style(selector)?.map(|s| {
+            let mut style = ViewStyle::default();
+            style.background_color = s.background_color;
+            style.opacity = s.opacity;
+            style.effective_opacity = s.effective_opacity;
+            style
+        }))
+    }
     fn input_id(&self, selector: &str) -> Result<Option<NodeId>, String> {
         self.lock().screen.input_id(selector)
     }
@@ -695,6 +710,8 @@ impl MenuValue {
                 role: None,
                 when: nsh_core::keymap::When::Always,
                 icon: None,
+                symbol: None,
+                destructive: false,
             }),
             MenuValue::Submenu {
                 label,
@@ -706,6 +723,8 @@ impl MenuValue {
                 items: items.into_iter().map(MenuValue::into_item).collect(),
                 // A scene's answer is about what a test can ask of a menu.
                 icon: None,
+                symbol: None,
+                inline: false,
             },
         }
     }
@@ -776,6 +795,9 @@ pub fn answer(model: &Model, step: &TestStep) -> Option<Result<serde_json::Value
         TestStep::Enabled { selector } => model.enabled(selector).map(Value::from),
         TestStep::SpanStyle { selector } => {
             model.span_style(selector).and_then(|s| json(to_value(s)))
+        }
+        TestStep::ViewStyle { selector } => {
+            model.view_style(selector).and_then(|s| json(to_value(s)))
         }
         TestStep::Dialogs => model.dialogs().and_then(|d| json(to_value(d))),
         TestStep::PendingDialog => model.pending_dialog().and_then(|d| json(to_value(d))),
@@ -931,6 +953,11 @@ impl Scene for RemoteScene {
     }
     fn span_style(&self, selector: &str) -> Result<SpanStyle, String> {
         self.get(TestStep::SpanStyle {
+            selector: selector.into(),
+        })
+    }
+    fn view_style(&self, selector: &str) -> Result<Option<ViewStyle>, String> {
+        self.get(TestStep::ViewStyle {
             selector: selector.into(),
         })
     }
@@ -1167,7 +1194,7 @@ pub trait Native: Send + Sync {
     /// does.
     fn drop_files(&self, at: Point<Points>, uris: Vec<String>) -> Result<(), String> {
         let _ = (at, uris);
-        Err("`dropFiles` runs headless and on Linux for now".into())
+        Err("`dropFiles` runs headless, on Linux and on macOS for now".into())
     }
     /// Lets go of the button [`Native::drag_and_hold`] holds, at `at`.
     fn drop_at(&self, at: Point<Points>) -> Result<(), String> {
@@ -1177,11 +1204,11 @@ pub trait Native: Send + Sync {
     /// Holds modifier keys down (`down`) or lets go of them: the presses,
     /// drags and hovers until then carry them. One that cannot refuses it.
     fn hold_keys(&self, keys: &str, down: bool) -> Result<(), String> {
-        let _ = (keys, down);
-        Err(
-            "holding keys (`keyboard.down` / `keyboard.up`) runs headless and on Linux for now"
-                .into(),
-        )
+        let _ = keys;
+        Err(crate::failure::unsupported_here(
+            if down { "keyboard.down" } else { "keyboard.up" },
+            "holding keys runs headless and on Linux for now",
+        ))
     }
     /// Types `text` into the focused input, key by key.
     fn type_text(&self, text: &str);
@@ -1561,6 +1588,9 @@ impl Agent {
             TestStep::Enabled { selector } => Ok(Value::from(self.scene.enabled(&selector)?)),
             TestStep::SpanStyle { selector } => {
                 serde_json::to_value(self.scene.span_style(&selector)?).map_err(|e| e.to_string())
+            }
+            TestStep::ViewStyle { selector } => {
+                serde_json::to_value(self.scene.view_style(&selector)?).map_err(|e| e.to_string())
             }
             TestStep::Value { selector } => {
                 let id = self.scene.input_id(&selector)?;
@@ -2319,7 +2349,7 @@ mod tests {
     };
     use nsh_engine::{EngineConfig, EngineControl};
 
-    use super::*;
+    use super::{Key, *};
 
     /// A count and a button that adds one.
     #[component]

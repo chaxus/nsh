@@ -69,12 +69,13 @@ use nsh_core::{
         WheelStep, ZOOM_IDLE, has_press, laid_out, latch_holds, transforms,
     },
     platform::InputModality,
-    tailwind::state::{HOVERED, PRESSED},
+    tailwind::state::{FOCUSED, HOVERED, PRESSED},
 };
 use objc2::{AnyThread, ClassType, rc::Retained, sel};
 use objc2_app_kit::{
     NSCursor, NSCursorFrameResizeDirections, NSCursorFrameResizePosition, NSEvent, NSEventMask,
-    NSEventModifierFlags, NSEventPhase, NSEventTrackingRunLoopMode, NSEventType, NSImage, NSWindow,
+    NSEventModifierFlags, NSEventPhase, NSEventTrackingRunLoopMode, NSEventType, NSImage, NSView,
+    NSWindow,
 };
 use objc2_foundation::{NSDate, NSSize};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -266,6 +267,8 @@ struct Pointer {
     mode: Mode,
     /// It moved (a JS responder granted now took it from a native press).
     moved: bool,
+    /// The modifier keys held when it went down (for JS touches).
+    modifiers: nsh_core::keymap::Modifiers,
 }
 
 /// A trackpad scroll gesture.
@@ -340,6 +343,57 @@ fn update_hover_tracking(surface: &Surface, view: &NshView) {
     }
 }
 
+/// `view` leaves the tree (`Remove`, `Delete`): it and the views inside it
+/// leave the hover and the keyboard focus, their states cleared and
+/// reported, without a leave or blur, as a removed DOM element. A removed
+/// view can outlive its component (a JS cycle through its ref), whose
+/// handlers must not run.
+pub(crate) fn removed(surface: &Surface, view: &NshView) {
+    let input = &surface.input;
+    let inside = |v: &NshView| v.ns().isDescendantOf(view.ns());
+    if !input.hovered.borrow().is_empty() {
+        let left: Vec<NshView> = input
+            .hovered
+            .borrow_mut()
+            .extract_if(.., |v| inside(v))
+            .collect();
+        for v in &left {
+            set_state(surface, v, HOVERED, false);
+        }
+    }
+    if input
+        .link_hovered
+        .borrow()
+        .as_ref()
+        .is_some_and(|(v, _)| inside(v))
+    {
+        input.link_hovered.borrow_mut().take();
+    }
+    let Some(window) = view.ns().window() else {
+        return;
+    };
+    let Some(responder) = window.firstResponder() else {
+        return;
+    };
+    if !responder
+        .downcast_ref::<NSView>()
+        .is_some_and(|r| r.isDescendantOf(view.ns()))
+    {
+        return;
+    }
+    // AppKit gives the focus of a view leaving its window to the window
+    // without a resign, but ends a field's editing (its blur): the window
+    // takes it now, the focus reported gone first so the resign is silent.
+    match responder
+        .downcast_ref::<ViewObj>()
+        .and_then(|obj| NshView::from_ns(obj))
+    {
+        Some(focused) => set_state(surface, &focused, FOCUSED, false),
+        None => crate::text_input::taken_out(&window),
+    }
+    window.makeFirstResponder(None);
+}
+
 /// Sets or clears interaction state `bit` of `view` and reports the
 /// states when they changed and the view tracks the bit.
 pub(crate) fn set_state(surface: &Surface, view: &NshView, bit: u16, on: bool) {
@@ -397,6 +451,46 @@ fn release_invalid_control_focus(surface: &Surface, view: &NshView) {
     });
     if focused && view.id() != ROOT_ID {
         window.makeFirstResponder(Some(root_in(surface, &window).ns()));
+    }
+}
+
+/// A batch is applied: the keyboard focus leaves a stop, or a field (an
+/// input's, a hosted view) in a view of ours, that it hid
+/// ([`NshView::seen_by_keys`]: `display: none` or `visibility: hidden`
+/// around it), for the root of its window, as it leaves a screen that
+/// hides. AppKit keeps a hidden view focused, and the keys would still act
+/// on what the user cannot see.
+pub(crate) fn release_hidden_focus(surface: &Surface) {
+    for root in std::iter::once(surface.root.clone()).chain(crate::window::roots(surface)) {
+        let Some(window) = root.ns().window() else {
+            continue;
+        };
+        let Some(mut at) = window
+            .firstResponder()
+            .and_then(|responder| responder.downcast::<objc2_app_kit::NSView>().ok())
+        else {
+            continue;
+        };
+        if !at.isDescendantOf(root.ns()) {
+            continue;
+        }
+        // The stop itself, or the view of ours holding the field (a field
+        // that edits has the window's field editor in it).
+        let view = loop {
+            if let Some(view) = NshView::from_ns(&at) {
+                break Some(view);
+            }
+            match crate::view::superview(&at) {
+                Some(up) => at = up,
+                None => break None,
+            }
+        };
+        if let Some(view) = view
+            && view != root
+            && !view.seen_by_keys()
+        {
+            window.makeFirstResponder(Some(root.ns()));
+        }
     }
 }
 
@@ -943,7 +1037,8 @@ fn context_menu(surface: &Surface, x: f32, y: f32, flags: NSEventModifierFlags) 
             return;
         }
         if crate::text::selectable(&v.state()) || v.state().props.selectable_view {
-            crate::text::context_menu(surface);
+            let area = crate::selectable_view::area_of(&v);
+            crate::text::context_menu(surface, area.as_ref());
             return;
         }
     }
@@ -1033,9 +1128,21 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &NSEvent, down: bool) -> bool {
     crate::scroll::key_scroll(surface, &hit.view, horizontal, m)
 }
 
+/// A view the app made `focusable` (and not disabled, nor an input, which
+/// focuses its editor): a press on it moves the keyboard focus there, as
+/// the other desktops' widgets do on a press.
+fn explicitly_focusable(view: &NshView) -> bool {
+    let state = view.state();
+    view.id() != ROOT_ID
+        && state.kind != ViewKind::Input
+        && !state.props.accessibility.state.disabled
+        && state.props.focusable == Some(true)
+        && view.can_target()
+}
+
 /// A mounted ordinary view the keyboard focus stops at (Tab): one that
 /// takes presses, or any `focusable` one ([`nsh_core::ViewProps::focus_stop`]),
-/// shown and reachable by the pointer.
+/// shown ([`NshView::seen_by_keys`]) and reachable by the pointer.
 pub(crate) fn is_key_stop(view: &NshView) -> bool {
     {
         let state = view.state();
@@ -1047,7 +1154,7 @@ pub(crate) fn is_key_stop(view: &NshView) -> bool {
             return false;
         }
     }
-    view.can_target() && !view.ns().isHiddenOrHasHiddenAncestor()
+    view.can_target() && !view.ns().isHiddenOrHasHiddenAncestor() && view.seen_by_keys()
 }
 
 /// A stop that Return and Space press ([`is_key_stop`] taking presses): a
@@ -1116,6 +1223,22 @@ pub(crate) fn control_activation_target(surface: &Surface, event: &NSEvent) -> O
         return None;
     }
     NshView::from_ns(native).filter(is_key_control)
+}
+
+/// Whether the keyboard focus is on a view of the window the newest modal
+/// over it covers: a focus the app left there (a popup closing gave it
+/// back to its trigger as a dialog opened). That view's own bindings take
+/// no keys ([`nsh_core::keymap::KeyFocus::covered`]).
+pub(crate) fn focus_covered(surface: &Surface) -> bool {
+    let root = event_root(surface);
+    let Some(responder) = root.ns().window().and_then(|w| w.firstResponder()) else {
+        return false;
+    };
+    let Some(native) = responder.downcast_ref::<objc2_app_kit::NSView>() else {
+        return false;
+    };
+    native.isDescendantOf(root.ns())
+        && !native.isDescendantOf(&crate::navigation::focus_scope(surface))
 }
 
 /// Presses `view` with no pointer to report, as Return and Space press a
@@ -1420,35 +1543,57 @@ fn pick_in(view: &NshView, p: (f32, f32)) -> Option<Hit> {
     own()
 }
 
-/// The innermost view at `p` (`view`'s coordinates) among the children
-/// in `view`'s container.
+/// The innermost view at `p` (`view`'s coordinates) among the children in
+/// `view`'s container, and any native raised among them (a lifted input's
+/// pad, which stacks there rather than over the whole view).
 fn pick_children(view: &NshView, p: (f32, f32)) -> Option<Hit> {
-    let p = into_container(view, p);
-    view.child_views()
-        .iter()
+    let container = view.container();
+    let cp = into_container(view, p);
+    let subviews: Vec<_> = container.subviews().iter().collect();
+    subviews
+        .into_iter()
         .rev()
-        .find_map(|child| into_child(child, p).and_then(|cp| pick_in(child, cp)))
+        .find_map(|sub| match NshView::from_ns(&sub) {
+            Some(child) => into_child(&child, cp).and_then(|c| pick_in(&child, c)),
+            None if on_native(view, &sub, p) => Some(Hit {
+                view: view.clone(),
+                native: true,
+            }),
+            None => None,
+        })
 }
 
 /// Whether `p` (`view`'s coordinates) is on `sub`, a hosted view of
 /// `view`'s.
 fn on_native(view: &NshView, sub: &objc2_app_kit::NSView, p: (f32, f32)) -> bool {
+    view.state()
+        .natives
+        .iter()
+        .any(|n| &*n.view == sub && native_contains(n, p))
+}
+
+fn native_contains(n: &crate::view::Native, p: (f32, f32)) -> bool {
     let (x, y) = p;
-    view.state().natives.iter().any(|n| {
-        let r = n.rect;
-        &*n.view == sub
-            && !n.view.isHidden()
-            && x >= r.origin.x.0
-            && y >= r.origin.y.0
-            && x < r.origin.x.0 + r.size.width.0
-            && y < r.origin.y.0 + r.size.height.0
-    })
+    let r = n.rect;
+    let sub = &n.view;
+    !sub.isHidden()
+        && x >= r.origin.x.0
+        && y >= r.origin.y.0
+        && x < r.origin.x.0 + r.size.width.0
+        && y < r.origin.y.0 + r.size.height.0
+        && crate::text_input::pad_contains(
+            sub,
+            objc2_foundation::NSPoint::new(
+                ((x - r.origin.x.0) / r.size.width.0) as f64 * sub.bounds().size.width,
+                ((y - r.origin.y.0) / r.size.height.0) as f64 * sub.bounds().size.height,
+            ),
+        )
 }
 
 /// The origin of `view`'s container's bounds (its scroll offset) and its
 /// zoom: the scroll state, not the bounds — while scrolling the offset
 /// shows as a layer transform and the bounds catch up when it settles.
-fn container_offset(view: &NshView) -> ((f32, f32), f32) {
+pub(crate) fn container_offset(view: &NshView) -> ((f32, f32), f32) {
     if view.container_view().is_none() {
         return ((0.0, 0.0), 1.0);
     }
@@ -1634,6 +1779,17 @@ fn down(
         crate::text::selection_down(surface, None, 0.0, 0.0, clicks, shift, false);
         return;
     };
+    // A press moves the keyboard focus to an explicitly `focusable` view
+    // under it, as the other desktops' widgets and browsers do. A field
+    // that edits keeps the focus (the root refuses the first responder
+    // during a press, `NshView::acceptsFirstResponder`), and a press on a
+    // view that is not focusable leaves it where it is.
+    if !hit.native
+        && let Some(window) = hit.view.ns().window()
+        && let Some(target) = chain(&hit.view).into_iter().find(explicitly_focusable)
+    {
+        window.makeFirstResponder(Some(target.ns()));
+    }
     let input = &surface.input;
     input.js_block.set(false);
     // A press stops the momentum a trackpad flick left running, wherever
@@ -1671,6 +1827,7 @@ fn down(
             pressed: Vec::new(),
             mode: Mode::Thumb(view.clone(), (x, y)),
             moved: false,
+            modifiers: modifiers(flags),
         };
         p.velocity.add(time, point(Points(x), Points(y)));
         crate::scroll::thumb_begin(surface, view);
@@ -1761,6 +1918,7 @@ fn down(
             None => Mode::Idle,
         },
         moved: false,
+        modifiers: modifiers(flags),
     };
     p.velocity.add(time, point(Points(x), Points(y)));
     if p.reporting {
@@ -2162,6 +2320,7 @@ fn report(surface: &Surface, phase: TouchPhase, p: &Pointer, activated: Option<N
         phase,
         timestamp: p.time,
         points: vec![point],
+        modifiers: p.modifiers,
         activated,
     };
     surface.event(
@@ -2234,18 +2393,19 @@ fn find_press(
             ));
         }
     }
-    views.iter().find_map(|v| {
-        let s = v.state();
-        (has_press(s.events) && !s.props.accessibility.state.disabled).then(|| {
-            Press::new(
+    nsh_core::input::pick_press(
+        views.iter().map(|v| {
+            let s = v.state();
+            (
                 v.clone(),
                 s.id,
                 s.events,
                 s.props.long_press_delay,
-                generation,
+                s.props.accessibility.state.disabled,
             )
-        })
-    })
+        }),
+        generation,
+    )
 }
 
 /// Presses in: `onPressDown`, the first time. `at` is the pointer in root
@@ -2274,7 +2434,7 @@ fn press_event(surface: &Surface, press: &Press, kind: EventKind, (x, y): (f32, 
         modifiers: press.modifiers,
         clicks: press.clicks,
     };
-    surface.event(press.node, kind, EventPayload::Press(event));
+    surface.event(press.target(kind), kind, EventPayload::Press(event));
 }
 
 fn cancel_press(surface: &Rc<Surface>, p: &mut Pointer) {
@@ -2284,7 +2444,7 @@ fn cancel_press(surface: &Rc<Surface>, p: &mut Pointer) {
 }
 
 /// The modifier keys of AppKit's `flags`.
-fn modifiers(flags: NSEventModifierFlags) -> nsh_core::keymap::Modifiers {
+pub(crate) fn modifiers(flags: NSEventModifierFlags) -> nsh_core::keymap::Modifiers {
     nsh_core::keymap::Modifiers {
         ctrl: flags.contains(NSEventModifierFlags::Control),
         alt: flags.contains(NSEventModifierFlags::Option),
@@ -2944,7 +3104,14 @@ fn wheel_event(
                 |v| v.state().events.contains(EventKind::Wheel),
                 |v| v.kind() == ViewKind::Scroll,
             )?;
-            Some((view, takes && !hit.native))
+            let along = input::wheel_along(
+                view.state().props.pan_activation,
+                dx.abs() > dy.abs(),
+                event
+                    .modifierFlags()
+                    .contains(NSEventModifierFlags::Control),
+            );
+            Some((view, takes && along && !hit.native))
         },
     );
     let Some((view, takes)) = routed else {
@@ -3309,14 +3476,7 @@ pub(crate) fn native_at(root: &NshView, x: f32, y: f32) -> Option<Retained<objc2
     s.natives
         .iter()
         .rev()
-        .find(|n| {
-            let r = n.rect;
-            !n.view.isHidden()
-                && lx >= r.origin.x.0
-                && ly >= r.origin.y.0
-                && lx < r.origin.x.0 + r.size.width.0
-                && ly < r.origin.y.0 + r.size.height.0
-        })
+        .find(|n| native_contains(n, (lx, ly)))
         .map(|n| n.view.clone())
 }
 

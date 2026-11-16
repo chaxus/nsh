@@ -12,19 +12,34 @@
 //! ```sh
 //! NSH_MOUNT_BENCH_ONLY=1 cargo test --release -p nsh-platform-macos --test native -- --ignored
 //! ```
+#[cfg(target_os = "macos")]
 mod embedded_scroll;
+#[cfg(target_os = "macos")]
+mod fps_collapse;
 #[cfg(target_os = "macos")]
 mod ime;
 #[cfg(target_os = "macos")]
 mod input_hidden;
 #[cfg(target_os = "macos")]
+mod keyboard;
+#[cfg(target_os = "macos")]
 mod menu_labels;
+#[cfg(target_os = "macos")]
+mod modal_fade;
 #[cfg(target_os = "macos")]
 mod mount;
 #[cfg(target_os = "macos")]
 mod press_momentum;
 #[cfg(target_os = "macos")]
+mod quit_requests;
+#[cfg(target_os = "macos")]
+mod scaled_input;
+#[cfg(all(target_os = "macos", feature = "shader"))]
+mod shader_content;
+#[cfg(target_os = "macos")]
 mod title_bar;
+#[cfg(target_os = "macos")]
+mod window_alert;
 #[cfg(target_os = "macos")]
 mod window_dialog;
 #[cfg(target_os = "macos")]
@@ -41,7 +56,18 @@ fn main() {
     } else {
         #[cfg(target_os = "macos")]
         {
-            if mount::bench_only() {
+            if std::env::var_os("NSH_QUIT_CHECK_CASE").is_some() {
+                quit_requests::run_case();
+            } else if std::env::var_os("NSH_QUIT_CHECK_ONLY").is_some() {
+                quit_requests::run();
+            } else if std::env::var_os("NSH_TITLE_BAR_CHECK_ONLY").is_some() {
+                title_bar::run();
+            } else if std::env::var_os("NSH_MODAL_FADE_CHECK_ONLY").is_some() {
+                modal_fade::run();
+            } else if std::env::var_os("NSH_SHADER_CONTENT_CHECK_ONLY").is_some() {
+                #[cfg(feature = "shader")]
+                shader_content::run();
+            } else if mount::bench_only() {
                 mount::bench_alone();
             } else if std::env::var_os("NSH_MENU_LABELS_CHECK_ONLY").is_some() {
                 window_press::run();
@@ -52,25 +78,41 @@ fn main() {
                 window_dialog::run();
             } else if std::env::var_os("NSH_WINDOW_FRAMES_CHECK_ONLY").is_some() {
                 window_frames::run();
+            } else if std::env::var_os("NSH_WINDOW_ALERT_CHECK_ONLY").is_some() {
+                window_alert::run();
             } else if std::env::var_os("NSH_INPUT_HIDDEN_CHECK_ONLY").is_some() {
                 input_hidden::run();
+            } else if std::env::var_os("NSH_FPS_COLLAPSE_CHECK_ONLY").is_some() {
+                fps_collapse::run();
+            } else if std::env::var_os("NSH_SCALED_INPUT_CHECK_ONLY").is_some() {
+                scaled_input::run();
             } else if std::env::var_os("NSH_ZOOM_CHECK_ONLY").is_some()
                 || std::env::var_os("NSH_ZOOM_PINCH_CHECK_ONLY").is_some()
             {
                 zoom::run();
+            } else if std::env::var_os("NSH_KEYBOARD_CHECK_ONLY").is_some() {
+                window_press::run();
+                keyboard::run();
             } else if std::env::var_os("NSH_EMBEDDED_SCROLL_CHECK_ONLY").is_some() {
                 embedded_scroll::run();
             } else if std::env::var_os("NSH_PRESS_MOMENTUM_CHECK_ONLY").is_some() {
                 press_momentum::run();
             } else {
+                quit_requests::run();
                 window_press::run();
                 window_hover::run();
                 title_bar::run();
                 window_dialog::run();
+                modal_fade::run();
+                #[cfg(feature = "shader")]
+                shader_content::run();
                 menu_labels::run();
                 window_frames::run();
+                keyboard::run();
                 ime::run();
                 input_hidden::run();
+                fps_collapse::run();
+                scaled_input::run();
                 zoom::run();
                 mount::run();
                 // Last: it makes the process an accessory app.

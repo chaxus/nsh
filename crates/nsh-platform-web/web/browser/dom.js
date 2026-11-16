@@ -82,6 +82,8 @@ export function createDom(invoke, values, reactive, live, wake) {
       call(305, [node, name, typeof value === "function"]);
       return;
     }
+    // The browser's selection menu cannot take the app's items.
+    if (name === "selectionMenu") return;
     if (PLATFORM_PROPS.has(name)) { platformProps(node, name, value); return; }
     if (name === "srcObject" && videos.has(node)) {
       // One kind at a time: setting one clears the other.

@@ -7,8 +7,10 @@
 //! every pointer event before the widgets under it. It never stops button,
 //! motion or touch events, so hosted native widgets (text fields) still get
 //! their clicks, focus and selection drags; presses, pans and scroll drags
-//! simply do not start on them. Wheel and touchpad scrolls it routes are
-//! stopped, unless they land on a native widget that scrolls itself.
+//! simply do not start on them, except that an `Input` listening to
+//! presses hears its own (a view around it does not). Wheel and touchpad
+//! scrolls it routes are stopped, unless they land on a native widget that
+//! scrolls itself.
 //!
 //! Hit testing walks the views itself rather than using `gtk_widget_pick`:
 //! GTK's picking knows nothing of `overflow: hidden` (the views clip in
@@ -224,6 +226,8 @@ struct Pointer {
     mode: Mode,
     /// It moved (a JS responder granted now took it from a native press).
     moved: bool,
+    /// The modifier keys held when it went down (for JS touches).
+    modifiers: nsh_core::keymap::Modifiers,
 }
 
 /// A touchpad scroll gesture.
@@ -819,7 +823,7 @@ fn dispatch(surface: &Rc<Surface>, event: &gdk::Event) -> glib::Propagation {
 /// around the one under it that listens to `onContextMenu` hears it (true:
 /// the click is taken). Text fields are GTK's widgets, which show their
 /// own menu.
-fn context_menu(surface: &Surface, x: f32, y: f32, state: gdk::ModifierType) -> bool {
+fn context_menu(surface: &Rc<Surface>, x: f32, y: f32, state: gdk::ModifierType) -> bool {
     let Some(hit) = pick(&event_root(surface), x, y) else {
         return false;
     };
@@ -906,7 +910,12 @@ fn wheel_event(
                 |v| v.state().events.contains(EventKind::Wheel),
                 |v| v.kind() == ViewKind::Scroll,
             )?;
-            Some((view, takes && !native_scrolls))
+            let along = input::wheel_along(
+                view.state().props.pan_activation,
+                dx.abs() > dy.abs(),
+                state.contains(gdk::ModifierType::CONTROL_MASK),
+            );
+            Some((view, takes && along && !native_scrolls))
         },
     );
     let Some((view, takes)) = routed else {
@@ -944,7 +953,7 @@ fn wheel_event(
 /// Select All, GTK's own labels), at `(x, y)` (root coordinates). Its
 /// items run the `clipboard.copy` / `selection.select-all` actions the
 /// target installs.
-fn edit_menu(surface: &Surface, target: &NshView, x: f32, y: f32) -> bool {
+fn edit_menu(surface: &Rc<Surface>, target: &NshView, x: f32, y: f32) -> bool {
     let selected = if target.state().props.selectable_view {
         crate::selectable_view::has_selection(surface, target)
     } else {
@@ -953,8 +962,17 @@ fn edit_menu(surface: &Surface, target: &NshView, x: f32, y: f32) -> bool {
     let p = event_root(surface)
         .compute_point(target, &graphene::Point::new(x, y))
         .unwrap_or_else(|| graphene::Point::new(x, y));
-    let popover = gtk::PopoverMenu::from_model(Some(&edit_menu_model(selected)));
+    let model = edit_menu_model(selected);
+    let app = app_menu(surface, target);
+    if let Some((section, _)) = &app {
+        model.append_section(None, section);
+    }
+    let popover = gtk::PopoverMenu::from_model(Some(&model));
+    if let Some((_, actions)) = &app {
+        popover.insert_action_group("selection-menu", Some(actions));
+    }
     popover.set_parent(target);
+    crate::key_focus::observe_popovers(surface, popover.upcast_ref());
     popover.set_has_arrow(false);
     popover.set_halign(gtk::Align::Start);
     popover.set_position(gtk::PositionType::Bottom);
@@ -965,6 +983,57 @@ fn edit_menu(surface: &Surface, target: &NshView, x: f32, y: f32) -> bool {
     });
     popover.popup();
     true
+}
+
+/// The app's items of a selectable view's menu (`selectionMenu`): a
+/// section of them and the `selection-menu` actions they run, each
+/// reporting its item's id as the root's `Menu` event. `None` without
+/// items (selectable text alone has none).
+fn app_menu(
+    surface: &Rc<Surface>,
+    target: &NshView,
+) -> Option<(gio::Menu, gio::SimpleActionGroup)> {
+    use nsh_core::desktop::MenuItem;
+    let items = target.state().props.selection_menu.clone();
+    if items.is_empty() {
+        return None;
+    }
+    let menu = gio::Menu::new();
+    let mut section = gio::Menu::new();
+    let actions = gio::SimpleActionGroup::new();
+    for (index, item) in items.iter().enumerate() {
+        match item {
+            MenuItem::Action(item) => {
+                let name = format!("item-{index}");
+                let action = gio::SimpleAction::new(&name, None);
+                action.set_enabled(item.enabled && item.id != 0);
+                let (weak, id) = (Rc::downgrade(surface), item.id);
+                action.connect_activate(move |_, _| {
+                    if let Some(surface) = weak.upgrade() {
+                        surface.event(
+                            nsh_core::ROOT_ID,
+                            EventKind::Menu,
+                            EventPayload::Map(vec![(
+                                "id",
+                                nsh_core::PayloadValue::Number(id as f64),
+                            )]),
+                        );
+                    }
+                });
+                actions.add_action(&action);
+                // No mnemonics in the app's labels.
+                let label = item.label.replace('_', "__");
+                section.append(Some(&label), Some(&format!("selection-menu.{name}")));
+            }
+            MenuItem::Separator => {
+                menu.append_section(None, &section);
+                section = gio::Menu::new();
+            }
+            MenuItem::Submenu { .. } => {}
+        }
+    }
+    menu.append_section(None, &section);
+    Some((menu, actions))
 }
 
 /// The edit menu's items (GTK's label with its mnemonic, action); Copy
@@ -1535,6 +1604,7 @@ fn down(surface: &Rc<Surface>, key: Key, x: f32, y: f32, time: f64, modifiers: g
             pressed: Vec::new(),
             mode: Mode::Thumb(view.clone(), (x, y)),
             moved: false,
+            modifiers: self::modifiers(modifiers),
         };
         p.velocity.add(time, point(Points(x), Points(y)));
         crate::scroll::thumb_begin(surface, view);
@@ -1573,7 +1643,11 @@ fn down(surface: &Rc<Surface>, key: Key, x: f32, y: f32, time: f64, modifiers: g
         gate,
         ..
     } = grab;
-    let press = if native {
+    // A text field takes its own clicks, and GTK still gets them; the
+    // `Input` itself hears them as a press, after the focus GTK gives it
+    // (a combobox opens its list), but no view around it does.
+    let input_view = native && hit.view.state().kind == ViewKind::Input;
+    let press = if native && !input_view {
         None
     } else {
         let clicks = if touch {
@@ -1581,7 +1655,12 @@ fn down(surface: &Rc<Surface>, key: Key, x: f32, y: f32, time: f64, modifiers: g
         } else {
             click_count(input, x, y, time)
         };
-        find_press(surface, &hit.view, &views, x, y)
+        let pressable = if input_view {
+            std::slice::from_ref(&hit.view)
+        } else {
+            &views[..]
+        };
+        find_press(surface, &hit.view, pressable, x, y)
             .map(|p| p.clicked(self::modifiers(modifiers), clicks))
     };
     if let Some(area) = &area {
@@ -1613,6 +1692,7 @@ fn down(surface: &Rc<Surface>, key: Key, x: f32, y: f32, time: f64, modifiers: g
         pressed,
         mode: Mode::Idle,
         moved: false,
+        modifiers: self::modifiers(modifiers),
     };
     p.velocity.add(time, point(Points(x), Points(y)));
     if p.reporting {
@@ -1844,6 +1924,7 @@ fn report(surface: &Surface, phase: TouchPhase, changed: &Pointer, activated: Op
         phase,
         timestamp: changed.time,
         points,
+        modifiers: changed.modifiers,
         activated,
     };
     surface.event(
@@ -1919,18 +2000,19 @@ fn find_press(
             }
         }
     }
-    views.iter().find_map(|v| {
-        let s = v.state();
-        (has_press(s.events) && !s.props.accessibility.state.disabled).then(|| {
-            Press::new(
+    nsh_core::input::pick_press(
+        views.iter().map(|v| {
+            let s = v.state();
+            (
                 v.clone(),
                 s.id,
                 s.events,
                 s.props.long_press_delay,
-                generation,
+                s.props.accessibility.state.disabled,
             )
-        })
-    })
+        }),
+        generation,
+    )
 }
 
 /// Presses in: `onPressDown`, the first time. `at` is the pointer in root
@@ -1959,7 +2041,7 @@ fn press_event(surface: &Surface, press: &Press, kind: EventKind, (x, y): (f32, 
         modifiers: press.modifiers,
         clicks: press.clicks,
     };
-    surface.event(press.node, kind, EventPayload::Press(event));
+    surface.event(press.target(kind), kind, EventPayload::Press(event));
 }
 
 fn cancel_press(surface: &Rc<Surface>, p: &mut Pointer) {
@@ -2403,6 +2485,39 @@ fn set_hovered(surface: &Surface, views: Vec<NshView>, x: f32, y: f32) {
     for v in entered {
         set_state(surface, v, HOVERED, true);
         mouse_event(surface, v, EventKind::MouseEnter, x, y, state);
+    }
+}
+
+/// `view` is removed or deleted: it and the views inside it leave the hover
+/// without an `onMouseLeave`, and the keyboard focus at once (a removal
+/// animation keeps them in the tree), as a removed DOM element does. A
+/// removed view can outlive its component (a JS cycle through its ref),
+/// whose handlers must not run.
+pub(crate) fn removed(surface: &Surface, view: &NshView) {
+    crate::navigation::drop_focus(view);
+    let input = &surface.input;
+    let inside = |v: &NshView| v == view || v.is_ancestor(view);
+    if input
+        .link_hovered
+        .borrow()
+        .as_ref()
+        .is_some_and(|(v, _)| inside(v))
+    {
+        input.link_hovered.borrow_mut().take();
+    }
+    if input.hovered.borrow().is_empty() {
+        return;
+    }
+    let mut gone = Vec::new();
+    input.hovered.borrow_mut().retain(|v| {
+        if inside(v) {
+            gone.push(v.clone());
+            return false;
+        }
+        true
+    });
+    for v in &gone {
+        set_state(surface, v, HOVERED, false);
     }
 }
 
@@ -2908,6 +3023,63 @@ mod tests {
         for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
             assert_eq!(held_button(button_mask(button)), Some(button));
         }
+    }
+
+    #[test]
+    fn a_removed_subtree_leaves_the_hover_without_a_word() {
+        use nsh_core::MountItem;
+
+        use crate::gtk_test::{apply, run, surface, view};
+
+        run(|| {
+            let surface = surface();
+            let create = |id| MountItem::Create {
+                id,
+                kind: ViewKind::View,
+            };
+            let insert = |parent, child| MountItem::Insert {
+                parent,
+                child,
+                before: None,
+            };
+            let track = |id| MountItem::TrackStates {
+                id,
+                states: HOVERED,
+            };
+            apply(
+                &surface,
+                &[
+                    create(2),
+                    create(4),
+                    create(6),
+                    track(2),
+                    track(4),
+                    track(6),
+                    insert(ROOT_ID, 2),
+                    insert(2, 4),
+                    insert(4, 6),
+                ],
+            );
+            let [outer, removed, inner] = [2, 4, 6].map(|id| view(&surface, id));
+            set_hovered(
+                &surface,
+                vec![inner.clone(), removed.clone(), outer.clone()],
+                0.0,
+                0.0,
+            );
+            assert_ne!(inner.state().states & HOVERED, 0);
+            // Kept alive (a JS cycle holds it): it and what it holds leave
+            // the hover, their states cleared.
+            apply(&surface, &[MountItem::Remove { id: 4 }]);
+            assert_eq!(
+                *surface.input.hovered.borrow(),
+                std::slice::from_ref(&outer)
+            );
+            for v in [&removed, &inner] {
+                assert_eq!(v.state().states & HOVERED, 0);
+            }
+            assert_ne!(outer.state().states & HOVERED, 0);
+        });
     }
 
     #[test]

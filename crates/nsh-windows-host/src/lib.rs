@@ -20,6 +20,10 @@
 //! - `--icon <file.ico>` is the app's icon: the window's (title bar,
 //!   taskbar) and its notifications'; `nsh run` and `nsh test` make one
 //!   from `nsh.json` `"icon"`.
+//! - `--background` runs the app in the background: its window shows
+//!   without activating and never comes to the foreground, so the keyboard
+//!   stays with the app the user works in (`nsh test --target windows` passes
+//!   it; the test agent's input goes to the window directly).
 //!
 //! The host registers `nsh_dev::pattern`'s test pattern as the live stream
 //! `nsh/test-pattern`, so an app's tests can play a stream
@@ -69,6 +73,7 @@ pub fn main() -> std::process::ExitCode {
             }
             "--trace" => options.trace = true,
             "--fps" => options.fps = true,
+            "--background" => options.background = true,
             "--app-id" => {
                 if let Some(id) = args.next().filter(|id| !id.is_empty()) {
                     options.app_id = id;

@@ -8,11 +8,17 @@
 - **Scrolling**: `pagingEnabled`, `snapToInterval` / `snapToOffsets` / `snapToAlignment`, `disableIntervalMomentum`,
   `decelerationRate`, `scrollable`, `bounces`, `contentInset`, `contentOffset`, `keyboardShouldPersistTaps`
   (`never` / `handled` / `always`), `onScroll` (+ `scrollEventThrottle`; at most once per engine turn), `onScrollDragStart` /
-  `EndDrag`, `onMomentumStart` / `End` (a glide caught by a new drag ends with `onMomentumEnd`). Snapping is decided
+  `EndDrag`, `onMomentumStart` / `End` (a glide caught by a new drag ends with `onMomentumEnd`). `scrollsToTop`
+  (default true) is UIKit's: a tap at the top of the window scrolls the scroll view under it to its top; `false` turns
+  that off for it (a chat thread that keeps the reader's place). iOS and Mac Catalyst only. Snapping is decided
   by `ScrollBehavior::snap_target` (core) on iOS and its Java port on Android, from the release offset, the projected glide and
   the velocity. Lists scrolled past their start keep the visible rows in place when items are inserted above them
   (`splice`), as a browser's scroll anchoring does; at their start the rows that arrive show, unless the list loads
-  pages at its start (`onLoadMoreAtStart`: the page it prepends keeps the rows in place there too).
+  pages at its start (`onLoadMoreAtStart`: the page it prepends keeps the rows in place there too). Keyed changes
+  (`keyExtractor`, or item identity; Rust's `.keys`) are matched row by row (`nsh_core::list_diff`, the core's
+  `ListState::reorder`): a row that stays keeps its cell, its content and its measured size wherever it moves, and so
+  do the rows a moved row passes (a window of rows that slides, an item sorted to the top); only new keys need cells.
+  The visible rows stay in place, anchored on the first of them that kept its order.
 - **Input**: fingers (and pens) drag scroll views; on the desktop backends and the web the mouse never does (dragging
   the content is a touchscreen's way to scroll): it scrolls with the wheel, the touchpad, the keyboard and the
   indicator (a scroll bar), and its drags are the app's (pans, responders, text selection). On Linux, Windows and desktop Web, the indicator shows while scrolling or when the pointer reaches its draggable thumb;
@@ -48,12 +54,16 @@
   Android's minimum span (about 27 mm between the fingers). In a pager, as UIKit's nesting does: a `ZScroll` with
   content to pan keeps a scroll view around from intercepting until its drag passes the slop, then keeps the drag if it
   has content that way and leaves it otherwise; panning into an edge, it hands the rest of the drag to a scroll view
-  around that can go on (the next or previous page). macOS: the scroll view's container's bounds are its frame over the
+  around that can go on (the next or previous page). The web does the same with its own touch pans (`chainDrag` in
+  `nsh.js`, `docs/dev/web.md` "Zooming"). macOS: the scroll view's container's bounds are its frame over the
   zoom scale (AppKit shows it as the container layer's scale, and hit tests and converts the zoomed children), committed
   on every move; the offset is UIKit's zoomed `contentOffset`, along both axes; trackpad pinches and Control + wheel zoom
   the innermost zoomable view around the pointer (`scroll.rs`'s `pinch`), wheels and trackpads scroll it both ways, and
-  texts and canvases are drawn again at the zoomed resolution when a zoom ends. Zoom reports go to the core
-  (`EngineControl::zoom`).
+  texts and canvases are drawn again at the zoomed resolution when a zoom ends. GPUI: the zoom is `nsh_core::scroll`'s
+  (`ScrollState::zoom`, offsets along both axes, `pinch`, `zoomTo`), on for the backends that set
+  `ScrollState::can_zoom` (GPUI; Windows and Linux leave it off and ignore the zoom props); the children are drawn
+  scaled by the zoom (`ViewState::child_matrix`, which hit tests follow), glyphs at the zoomed size every frame. Zoom
+  reports go to the core (`EngineControl::zoom`).
 - **List** props: `each`, `estimatedItemSize`, `numColumns` (both may change while the list shows: the first visible item keeps its place, `ListState::visible_anchor`; a change of columns remembers it in `columns_anchor`, so resizing back and forth does not drift), `inverted` (chat: item 0 at the bottom, starts at the end and keeps its
   distance from the end as content changes; with `onLoadMoreAtStart`, only while at it, the visible rows when scrolled away), `maintainVisibleContentPosition` (`autoscrollToBottomThreshold`: a list
   that is not inverted follows its end while within that distance of it, `ListState::anchor_end`; scrolled up, growth
