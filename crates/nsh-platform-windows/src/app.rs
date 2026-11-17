@@ -169,17 +169,17 @@ pub struct AppOptions {
     /// release runner run apps on their own, with none
     /// ([`Limits::standalone`]). See [`AppView::set_limits`].
     pub limits: Limits,
-    /// Where the apps it runs keep their data, each in `<dir>/<app id>`
-    /// (`nsh.json` `"id"`, which travels with the bundle): `None` uses the
-    /// system's data directory ([`nsh_engine::data_dir`]); an app that
-    /// embeds nsh gives its own (its data directory + `/nsh`, say).
+    /// The app's own data directory, used as it is
+    /// ([`nsh_engine::EngineConfig::data_dir`]): the release runner's
+    /// `nsh.json` `"dataDir"`, the development host's `--data-dir`. `None`:
+    /// the one under its id in the system's directory for apps' data.
     pub data_dir: Option<PathBuf>,
     /// Where the apps it runs keep their caches (the images they
     /// downloaded) and how much each keeps: by default the system's cache
     /// directory, each app's in `<dir>/<app id>`. See [`AppView::set_cache`].
     pub cache: nsh_engine::CacheOptions,
     /// The apps' storage (`nsh/storage`), overriding the `storage.json` in
-    /// their directory of [`data_dir`](Self::data_dir).
+    /// their data directory.
     pub storage: Option<Arc<dyn nsh_engine::StorageBackend>>,
     /// The app this view runs owns the process's notifications: the process
     /// takes [`app_id`](Self::app_id) as its AppUserModelID (also what the
@@ -475,7 +475,8 @@ impl AppView {
             limits: options.limits,
             ui_sets: ui_sets(),
             runtime: None,
-            data_dir: options.data_dir.clone().or_else(nsh_engine::data_dir),
+            support_dir: nsh_engine::support_dir(),
+            data_dir: options.data_dir.clone(),
             cache: options.cache.clone(),
             storage: options.storage.clone(),
             clock: Default::default(),
@@ -615,8 +616,10 @@ fn initial_environment() -> Environment {
         canvas_render: true,
         file_requests: true,
         notifications: true,
-        audio: true,
-        webview_requests: true,
+        audio: cfg!(feature = "media"),
+        // WebView2, in builds with it.
+        web_views: cfg!(feature = "webview"),
+        webview_requests: cfg!(feature = "webview"),
         // wgpu, in builds with it, until it finds no GPU.
         shaders: nsh_engine::shader::LINKED,
         ..Environment::default()
@@ -760,8 +763,13 @@ fn run_on_this_thread(source: AppSource, options: AppOptions) -> std::process::E
     if launch.attributes.transparent == Some(true) {
         options.transparent = true;
     }
-    // A backdrop shows through a window without a redirection bitmap.
+    // A backdrop shows through a window without a redirection bitmap,
+    // which only a window being made can drop. A development host's
+    // options come with its app, after the window is made: it is composed
+    // in case they bring a backdrop, and draws its opaque background until
+    // they do ([`crate::surface::Surface::transparent`]).
     let composed = options.transparent
+        || held
         || launch
             .attributes
             .backdrop
@@ -771,7 +779,8 @@ fn run_on_this_thread(source: AppSource, options: AppOptions) -> std::process::E
     let kept = match app {
         Some(app) if launch.restore_bounds => {
             let mut config = EngineConfig::new(app);
-            config.data_dir = options.data_dir.clone().or_else(nsh_engine::data_dir);
+            config.support_dir = nsh_engine::support_dir();
+            config.data_dir = options.data_dir.clone();
             config.storage = options.storage.clone();
             config.main_window_placement(&crate::window_state::displays())
         }
@@ -976,6 +985,48 @@ mod tests {
             // SAFETY: the test's own windows.
             let _ = unsafe { DestroyWindow(view.hwnd()) };
         }
+    }
+
+    /// A development host's window is made before its app's options come
+    /// (#2177): composed, with its frame, opaque until a backdrop comes,
+    /// see-through while it has one.
+    #[test]
+    fn a_composed_window_takes_a_backdrop_that_comes_later() {
+        let view = AppView::make(
+            None,
+            AppOptions {
+                size: (200, 120),
+                skip_taskbar: true,
+                ..Default::default()
+            },
+            true,
+        )
+        .unwrap();
+        let hwnd = view.hwnd();
+        let (style, ex) = styles(hwnd);
+        assert_ne!(style & WS_CAPTION.0, 0, "keeps its frame");
+        assert_ne!(ex & WS_EX_NOREDIRECTIONBITMAP.0, 0, "no redirection bitmap");
+        let surface = view.surface();
+        assert!(!surface.transparent());
+        assert_ne!(
+            crate::system::window_background(surface),
+            nsh_core::Color::TRANSPARENT
+        );
+        let backdrop = |b| {
+            let mut attrs = nsh_core::desktop::WindowAttributes::default();
+            attrs.backdrop = Some(b);
+            attrs
+        };
+        crate::shell::apply(surface, hwnd, &backdrop(Backdrop::Popover));
+        assert!(surface.transparent());
+        assert_eq!(
+            crate::system::window_background(surface),
+            nsh_core::Color::TRANSPARENT
+        );
+        crate::shell::apply(surface, hwnd, &backdrop(Backdrop::None));
+        assert!(!surface.transparent());
+        // SAFETY: the test's own window.
+        let _ = unsafe { DestroyWindow(hwnd) };
     }
 
     #[test]

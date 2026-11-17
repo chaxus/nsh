@@ -23,7 +23,7 @@ what is ported. A module ported from one names its source in its module doc; kee
 | `commands/` | prosemirror-commands and prosemirror-schema-list: `Command`s over a state and an optional dispatch, `chain_commands`, `base_keymap` |
 | `extensions/` | optional behavior as plugins: `history`, `keymap`, `input_rules`, `markdown` (Markdown shortcuts as you type, Markdown paste and copy, mapped by `MarkdownNames`); `starter`, the optional starter schema (paragraphs, headings, quotes, code, lists, images, the common marks) with its keymap and input rules |
 | `tables/` | prosemirror-tables: `TableMap`, `CellSelection`, `fix_tables`, the `table_editing` plugin, the table commands and Tiptap's table node specs (see "Tables") |
-| `formats/` | `DocFormat`: `JsonFormat`, `PlainTextFormat`, `MarkdownFormat` (names mapped by `MarkdownNames`; GFM task items read as `taskList` / `taskItem`, a run of them splitting a bullet list, and write as `- [x]` / `- [ ]`), the clipboard's `slice_to_text` / `slice_from_text` |
+| `formats/` | `DocFormat`: `JsonFormat`, `PlainTextFormat`, `MarkdownFormat` (names mapped by `MarkdownNames`; GFM task items read as `taskList` / `taskItem`, a run of them splitting a bullet list, and write as `- [x]` / `- [ ]`; Markdown read to 64 levels of blocks and inline content, deeper content as its text, so a paste of thousands of nested quotes cannot run the stack out), the clipboard's `slice_to_text` / `slice_from_text` |
 
 ## Documents defined by the schema
 
@@ -158,24 +158,47 @@ restyles.
 Geometry (`geometry.rs`): maps document positions to the laid-out text's lines and back from the blocks' and texts'
 layouts, so the caret and hit tests follow the app's fonts (classes included). A position at a wrap shows at the
 upper line's end with `Affinity::Upstream`.
+The view reports `contentSizeChange({ contentSize })` (as `Input`'s `onContentSizeChange`) when the laid-out
+document's size changes, at most once per engine frame. `contentSize` is the full flow extent in points, including
+offscreen blocks and independent of the viewport's minimum height; it excludes the `content` part's padding.
+Scrolling does not report (`onScroll` does). The event stops at idle and its pending task is canceled with the view.
+Rust uses `RichEditor::on_content_size_change`, whose listener receives
+`RichEditorEvent::ContentSizeChange { content_size }`.
 
 Input (`controller.rs`): as the code `Editor`, an invisible native input at the caret (the sink) takes typed text
 and input methods. Typed text goes to plugins' `handle_text_input` (input rules), else is inserted with the stored
 marks (origin `Input`). While an input method composes, its text shows in the line at the caret with the block's
 typography, and the document waits; the commit is one transaction tagged with the composition's id (`composition`
-meta, which the history groups). Keys: the view binds, while focused, every keystroke a keymap could use (`keys.rs`)
+meta, which the history groups). `RichEditorEvent::CompositionChange(bool)` (Rust
+`.on_composition_change`, JS `onCompositionChange({ composing })`) reports each view's start/end transitions,
+including cancellation, after its session flag, held input and composition signal are updated. Updates within an
+active composition keep the same state and emit no further transition. Starting and canceling composition leave
+the document and transaction revision unchanged; a text commit remains a normal transaction. Observers can retain
+the view while composing and release it on the end notification. Keys: the view binds, while focused, every keystroke a keymap could use (`keys.rs`)
 and offers each as a `KeyEvent` to the selected node's view, the plugins' `handle_key_down`, the base keymap, then
 copy / cut / select all and the caret movement (graphemes, words, line ends, lines and pages by geometry, keeping the
 goal x, the document's ends). An Escape none of them takes collapses a selection to its head; with nothing selected,
 in a terminal, it blurs the editor, so the focus can leave it (Escape stays bound for the plugins' own, a
 suggestion's).
 Presses: a node view's `handle_event`, the plugins' click hooks (`handle_click_on` per ancestor, then
-`handle_click`, double and triple likewise), then a caret (Shift extends), a word, the textblock or a node selection;
+`handle_click`, double and triple likewise), then a caret (Shift extends), a word, the textblock or a node selection (a press inside an inline node view's box
+selects its node without Shift or Mod: `inline_view_at`, after prosemirror-view's `selectClickedLeaf`; an inline
+view's box is the frame the text engine placed it at, `TextGeo::widths`, which fixes the positions around it, the
+text between two fixed points scaled to the room it has);
 a drag extends through `create_selection_between`, and past the viewport's top or bottom it scrolls the view on a timer (the code `Editor`'s `AutoScroll` and `edge_speed`) and extends again at each step. Paste: HTML through `transform_pasted_html` and the
 `clipboard_parser` (else the schema's), read by `DomParser::parse_from_clipboard`: HTML an editor copied carries
 `data-pm-slice` and comes back as the copied slice (its open depths, its whitespace, wrapped in its context again),
 other HTML is fitted to the selection (`parse_with_context`); else text through `transform_pasted_text`,
-`clipboard_text_parser` (else `slice_from_text`); then `transform_pasted`, `handle_paste`, else a replace of the selection (origin `Paste`). Files
+`clipboard_text_parser` (else `slice_from_text`); then `transform_pasted`, `handle_paste`, else a replace of the selection (origin `Paste`).
+A JS plugin's paste hooks (`RichEditorPlugin.transformPasted` / `handlePaste`; `PluginSpec::__js_hooks` hands them
+to the view) cannot run in the paste event, where JS is not running: when a plugin has one, pastes queue
+(`Rv::pastes`) and one task (`drain_pastes`) takes them in order through the same steps, awaiting each JS hook
+(`Callback::call_async`). After each await it checks the state: a document or selection changed meanwhile means the
+content was made for another place, so the paste starts over from the current state (dropped after three tries);
+Rust hooks so always see the current state. Typing never waits; a paste waits a JS turn.
+`EditorSession::paste_html` / `paste_text` (JS `pasteHTML` / `pasteText`, ProseMirror's) take the same steps
+(`parse_paste`, `paste_transaction`, shared with the view) without the JS hooks: they are what a `handlePaste` calls
+to go on with content it cleaned up, and a JS hook could only answer a turn later.
 (images with their bytes, `file:` URLs from a file manager) go to the app as `onPasteFiles` and insert nothing,
 as Tiptap's file handler leaves them to its `onPaste`. Files dropped on the desktops are the host's `onFileDrop`
 (a component's host takes a view's file drop events, `ComponentHostProps`): the root listens only when the app
@@ -330,6 +353,10 @@ JS describes.
   nothing. `pageCoordsAtPos` / `posAtPageCoords` answer the same in page (root) points, for UI an app places
   outside the editor (a block handle): the view keeps the content's page offset, measured after each layout of the
   content and as a handle drag starts, and moved by the scroll since.
+  Scrolling an ancestor or a sibling's layout can move the editor on the page with every editor-local frame
+  unchanged, so the view also measures its placement when its viewport lays out and after each page query
+  (`Rv::place`, one measurement in flight): a query after such a move answers by the new placement a frame
+  later, with no app call. Local coordinates, document and selection remain unchanged.
   A query's position outside `0..=doc.content.size` throws a `RangeError` (ProseMirror's `resolve`;
   `RichEditorSession::check_pos`), never a `null`: `null` is an answer (no node after the position, no view, no
   such parent). `run` / `can` throw a `TypeError` for a command, node or mark type the editor does not know.

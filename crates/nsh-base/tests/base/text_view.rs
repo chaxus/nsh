@@ -3,7 +3,8 @@
 //! reports the modifier keys held.
 
 use nsh_base::{
-    TextViewClasses, TextViewLinkPressEvent, TextViewPart, TextViewParts, TextViewStyles, text_view,
+    TextViewClasses, TextViewLinkPressEvent, TextViewPart, TextViewParts, TextViewStyles,
+    TextViewTaskPressEvent, text_view,
 };
 use nsh_core::{
     StyleKey,
@@ -478,4 +479,187 @@ fn a_wide_image_on_its_own_is_at_most_as_wide_as_the_text() {
         px(75.0),
         "the aspect ratio kept: {bounds:?}"
     );
+}
+
+mod streaming {
+    //! A reply arriving in a `TextView`, 24 bytes at a time: what each
+    //! update costs from the press that adds the text to the batch of mount
+    //! items (reading the Markdown, the rows, layout), and how many items
+    //! it sends.
+
+    use std::{
+        cell::RefCell,
+        time::{Duration, Instant},
+    };
+
+    use nsh_base::{MarkdownOptions, text_view};
+    use nsh_core::{
+        ApproxTextEngine, Core, EventKind, EventPayload, MountItem, ROOT_ID, Size, element::Root,
+        prelude::*,
+    };
+
+    thread_local! {
+        /// The reply the view streams.
+        static REPLY: RefCell<String> = const { RefCell::new(String::new()) };
+    }
+
+    /// Shows 24 bytes more of [`REPLY`] with each press.
+    #[component]
+    fn Streamed() -> impl IntoElement {
+        let shown = signal(0usize);
+        view()
+            .flex_1()
+            .on_press(move || shown.update(|n| *n += 24))
+            .child(
+                text_view()
+                    .markdown(move || {
+                        let shown = shown.get();
+                        Some(REPLY.with_borrow(|reply| {
+                            SharedString::from(reply[..shown.min(reply.len())].to_owned())
+                        }))
+                    })
+                    .options(MarkdownOptions {
+                        streaming: true,
+                        ..MarkdownOptions::default()
+                    }),
+            )
+    }
+
+    fn reply(bytes: usize) -> String {
+        let section = "## Section\n\nSome **bold** text with `code`, a [link](https://example.com) and $x^2$.\n\n- item one\n- item two with *emphasis*\n\n```rust\nfn main() { println!(\"hi\"); }\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n> [!NOTE]\n> A note.\n\n";
+        section.repeat(bytes / section.len() + 1)[..bytes].to_owned()
+    }
+
+    fn table(rows: usize) -> String {
+        let mut text =
+            String::from("Here are the fields:\n\n| Name | Type | Notes |\n|---|---|---|\n");
+        for n in 0..rows {
+            text.push_str(&format!("| `field_{n}` | `Option<u32>` | see `docs` |\n"));
+        }
+        text
+    }
+
+    fn list(items: usize) -> String {
+        let mut text = String::from("Intro.\n\n");
+        for n in 0..items {
+            text.push_str(&format!("- `item_{n}`: calls `foo()` then `bar()`\n"));
+        }
+        text
+    }
+
+    fn program(lines: usize) -> String {
+        let mut text = String::from("Here is the program:\n\n```rust\n");
+        for n in 0..lines {
+            text.push_str(&format!(
+                "    let value_{n} = compute(&items[{n}], Some(\"x\"))?;\n"
+            ));
+        }
+        text.push_str("```\n");
+        text
+    }
+
+    /// `source` streamed: the time of every update and the mount items it
+    /// sent.
+    fn stream(source: &str) -> (Vec<Duration>, Vec<usize>) {
+        REPLY.set(source.to_owned());
+        let mut core = Core::new(ApproxTextEngine, Size::new(px(390.0), px(844.0)));
+        core.mount_root(&Root::new::<Streamed>(|| ()));
+        let batch = core.commit().expect("the first frame");
+        let host = batch
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Insert {
+                    parent: ROOT_ID,
+                    child,
+                    ..
+                } => Some(*child),
+                _ => None,
+            })
+            .expect("the root's host");
+        let (mut times, mut items) = (Vec::new(), Vec::new());
+        for _ in 0..source.len().div_ceil(24) {
+            let start = Instant::now();
+            assert!(core.component_event(host, EventKind::Press, &EventPayload::None));
+            let batch = core.commit();
+            times.push(start.elapsed());
+            items.push(batch.map_or(0, |b| b.items.len()));
+        }
+        (times, items)
+    }
+
+    /// `cargo test --release -p nsh-base --test base bench_text_view_streaming
+    /// -- --ignored --nocapture`; the numbers are in `docs/dev/performance.md`.
+    /// With `NSH_BENCH_ITEMS=<file>` the mount items of every update are
+    /// written there, to compare two builds.
+    #[test]
+    #[ignore]
+    fn bench_text_view_streaming() {
+        let mut counts = String::new();
+        println!("total ms over the stream / average ms of the last 10 updates / mount items");
+        for (name, source) in [
+            ("typical, 20 KB", reply(20_000)),
+            ("typical, 40 KB", reply(40_000)),
+            ("ends in a 400-row table", table(400)),
+            ("ends in a 400-item list", list(400)),
+            ("ends in 400 lines of code", program(400)),
+        ] {
+            let (times, items) = stream(&source);
+            let ms = |d: &Duration| d.as_secs_f64() * 1000.0;
+            let total: f64 = times.iter().map(ms).sum();
+            let last = &times[times.len().saturating_sub(10)..];
+            let last: f64 = last.iter().map(ms).sum::<f64>() / last.len() as f64;
+            println!(
+                "{name:<26} {:>5} updates | {total:>9.1} / {last:>7.3} | {:>7} items",
+                times.len(),
+                items.iter().sum::<usize>()
+            );
+            counts.push_str(&format!("{name}: {items:?}\n"));
+        }
+        if let Ok(path) = std::env::var("NSH_BENCH_ITEMS") {
+            std::fs::write(path, counts).unwrap();
+        }
+    }
+}
+
+const TASKS: &str = "- [ ] first\n- [x] second\n  - [ ] nested\n\n<details>\n<summary>More</summary>\n\n\
+                     - [x] hidden\n\n</details>\n\n> - [ ] last";
+
+/// Task items at the top, nested, in a closed disclosure and in a quote
+/// after it; what their boxes' presses reported.
+#[component]
+fn PressableTasks() -> impl IntoElement {
+    let pressed = signal(Vec::<String>::new());
+    view()
+        .child(
+            text_view()
+                .markdown(TASKS)
+                .on_task_press(move |e: &TextViewTaskPressEvent| {
+                    let report = format!("{}:{}", e.index, e.checked);
+                    pressed.update(|p| p.push(report));
+                }),
+        )
+        .child(text(move || {
+            format!("Pressed: {}", pressed.get().join(" "))
+        }))
+}
+
+#[test]
+fn a_pressed_task_box_reports_its_place_in_the_document_and_the_state_asked_for() {
+    let mut app = Headless::start(EngineConfig::new(Root::of::<PressableTasks>())).unwrap();
+    app.wait_for("first").unwrap();
+    app.press("label:second").unwrap();
+    app.press("label:nested").unwrap();
+    // The closed disclosure's task keeps its place before the one after it.
+    app.press("label:last").unwrap();
+    app.wait_for("Pressed: 1:false 2:true 4:true").unwrap();
+    // Opened, closed and opened again, its task is counted from the same place.
+    app.press("More").unwrap();
+    app.press("label:hidden").unwrap();
+    app.press("More").unwrap();
+    app.press("More").unwrap();
+    app.press("label:hidden").unwrap();
+    app.press("label:first").unwrap();
+    app.wait_for("Pressed: 1:false 2:true 4:true 3:false 3:false 0:true")
+        .unwrap();
 }

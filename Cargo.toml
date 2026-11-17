@@ -185,9 +185,6 @@ windows = { version = "0.62", features = [
   "Win32_Graphics_Gdi",
   "Win32_Graphics_Imaging",
   "Win32_Graphics_Imaging_D2D",
-  "Win32_Media_Audio",
-  "Win32_Media_Audio_XAudio2",
-  "Win32_Media_MediaFoundation",
   "Win32_Storage_Xps",
   "Win32_System_Com",
   "Win32_System_Com_StructuredStorage",
@@ -253,9 +250,8 @@ tokio-tungstenite = { version = "0.28", default-features = false, features = ["c
 # The TLS crypto provider for the WebSocket client: on Android nothing else selects one (ureq is off there), so
 # rustls 0.23 fails every wss:// handshake with "Could not automatically determine the process-level CryptoProvider".
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-webpki-roots = "1"
 # System trust store for the WebSocket client (and ureq's `platform-verifier`): corporate and newly
-# issued roots work without NSH shipping them. Android keeps webpki-roots (needs a JNI init).
+# issued roots work without NSH shipping them. Android's host initializes it over JNI.
 rustls-platform-verifier = "0.7"
 
 rolldown = "=1.2.13"
@@ -304,6 +300,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
   "NSURLRequest",
   "NSURLResponse",
   "NSURLSession",
+  "NSUserActivity",
   "NSUserDefaults",
   "NSValue",
 ] }
@@ -328,12 +325,19 @@ objc2-ui-kit = { version = "0.3.2", default-features = false, features = [
   "UIAccessibility",
   "UIAccessibilityConstants",
   "UIAction",
+  "UIBezierPath",
   "UIButton",
+  "UIContextMenuConfiguration",
+  "UIContextMenuInteraction",
   "UIMenu",
   "UIMenuElement",
+  "UIPreviewParameters",
   "UISegmentedControl",
   "UISplitViewController",
   "UIAlertController",
+  "UIActivity",
+  "UIActivityItemProvider",
+  "UIActivityViewController",
   "UIPopoverPresentationController",
   "UIPopoverSupport",
   "UIAccessibilityCustomAction",
@@ -402,6 +406,7 @@ objc2-ui-kit = { version = "0.3.2", default-features = false, features = [
   "UITraitCollection",
   "UIView",
   "UIViewController",
+  "UIViewLayoutRegion",
   "UIWindow",
   "UIWindowScene",
   "UIWindowSceneGeometry",

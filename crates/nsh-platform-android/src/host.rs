@@ -67,8 +67,8 @@ pub(crate) struct Host {
     /// The embedding app's runtime for apps loaded from now on.
     runtime: Mutex<Option<tokio::runtime::Handle>>,
     /// Where loaded apps keep their data, each in a directory named by its
-    /// id ([`EngineConfig::data_dir`]): `nsh` in the files directory.
-    pub(crate) data_dir: Option<std::path::PathBuf>,
+    /// id ([`EngineConfig::support_dir`]): `nsh` in the files directory.
+    pub(crate) support_dir: Option<std::path::PathBuf>,
     /// The directory loaded apps keep their storage in, overriding their own
     /// (`NshView.setStorageDirectory`); `None`: theirs.
     storage: Mutex<Option<std::path::PathBuf>>,
@@ -234,7 +234,8 @@ impl Host {
             limits: *self.limits.lock().expect("limits"),
             ui_sets: crate::ui_sets(),
             runtime: self.runtime.lock().expect("runtime").clone(),
-            data_dir: self.data_dir.clone(),
+            support_dir: self.support_dir.clone(),
+            data_dir: None,
             cache,
             storage: self.storage.lock().expect("storage").as_ref().map(|dir| {
                 nsh_engine::FileStorage::open(dir) as Arc<dyn nsh_engine::StorageBackend>
@@ -606,6 +607,57 @@ pub(crate) unsafe fn host<'a>(handle: jlong) -> &'a Arc<Host> {
     unsafe { &*(handle as *const Arc<Host>) }
 }
 
+/// Gives the WebSocket client's TLS verifier (rustls-platform-verifier,
+/// `CertificateVerifier.java`) the app's Context, once per process, so
+/// `wss://` trusts the system's roots (and those a user or administrator
+/// installed) rather than a compiled-in set (#914).
+#[cfg(feature = "websocket")]
+fn init_tls_verifier(env: &mut JNIEnv<'_>, view: &JObject<'_>) {
+    static DONE: std::sync::Once = std::sync::Once::new();
+    DONE.call_once(|| {
+        let context = env
+            .call_method(view, "getContext", "()Landroid/content/Context;", &[])
+            .and_then(|context| context.l())
+            .and_then(|context| {
+                env.call_method(
+                    &context,
+                    "getApplicationContext",
+                    "()Landroid/content/Context;",
+                    &[],
+                )
+            })
+            .and_then(|context| context.l());
+        let context = match context {
+            Ok(context) => context,
+            Err(err) => {
+                let _ = env.exception_clear();
+                log::error!("nsh: no Context for the TLS verifier: {err}");
+                return;
+            }
+        };
+        // SAFETY: the verifier's jni 0.22 wraps this thread's attached
+        // JNIEnv and a live local reference of this native call's frame.
+        let mut unowned = unsafe { jni_verifier::EnvUnowned::from_raw(env.get_raw().cast()) };
+        let outcome = unowned
+            .with_env(|env| {
+                // SAFETY: as above; the 0.21 wrapper keeps the reference.
+                let context = unsafe {
+                    jni_verifier::objects::JObject::from_raw(env, context.as_raw().cast())
+                };
+                rustls_platform_verifier::android::init_with_env(env, context)
+            })
+            .into_outcome();
+        match outcome {
+            jni_verifier::Outcome::Ok(()) => {}
+            jni_verifier::Outcome::Err(err) => {
+                let _ = env.exception_clear();
+                log::error!("nsh: TLS verifier setup failed: {err}");
+            }
+            jni_verifier::Outcome::Panic(_) => log::error!("nsh: TLS verifier setup panicked"),
+        }
+    });
+}
+
 #[unsafe(no_mangle)]
 extern "system" fn Java_com_longbridge_nsh_Native_create(
     mut env: JNIEnv<'_>,
@@ -613,14 +665,16 @@ extern "system" fn Java_com_longbridge_nsh_Native_create(
     view: JObject<'_>,
     density: jfloat,
     trace: jboolean,
-    data_dir: JString<'_>,
+    support_dir: JString<'_>,
     cache_dir: JString<'_>,
 ) -> jlong {
+    #[cfg(feature = "websocket")]
+    init_tls_verifier(&mut env, &view);
     let Ok(view) = env.new_global_ref(view) else {
         return 0;
     };
-    let data_dir = env
-        .get_string(&data_dir)
+    let support_dir = env
+        .get_string(&support_dir)
         .ok()
         .map(|dir| std::path::PathBuf::from(String::from(dir)));
     let cache_dir = (!cache_dir.is_null())
@@ -658,7 +712,7 @@ extern "system" fn Java_com_longbridge_nsh_Native_create(
         granted: Mutex::new(None),
         limits: Mutex::new(nsh_engine::Limits::default()),
         runtime: Mutex::new(None),
-        data_dir,
+        support_dir,
         storage: Mutex::new(None),
         access: Mutex::new(Arc::default()),
         host_tokens: Mutex::new(None),
@@ -1282,6 +1336,8 @@ extern "system" fn Java_com_longbridge_nsh_Native_environment(
     environment.os = nsh_engine::Os::Android;
     environment.notifications = true;
     environment.audio = true;
+    // A chooser over `ACTION_SEND` (`Share.java`).
+    environment.share = true;
     environment.os_version = (v[11] as u16, 0);
     environment.idiom = match v[12] as u8 {
         1 => Idiom::Pad,
@@ -1519,7 +1575,7 @@ extern "system" fn Java_com_longbridge_nsh_Native_touch(
         ints(&paths),
     );
     let n = ids.len();
-    let mut c = vec![0.0; n * 4];
+    let mut c = vec![0.0; n * 8];
     let mut flags = vec![0u8; n];
     if targets.len() != n
         || path_lengths.len() != n
@@ -1543,10 +1599,22 @@ extern "system" fn Java_com_longbridge_nsh_Native_touch(
                 id: ids[i] as u32,
                 target: targets[i] as NodeId,
                 path,
-                page: point(px(c[i * 4]), px(c[i * 4 + 1])),
-                location: point(px(c[i * 4 + 2]), px(c[i * 4 + 3])),
+                page: point(px(c[i * 8]), px(c[i * 8 + 1])),
+                location: point(px(c[i * 8 + 2]), px(c[i * 8 + 3])),
                 changed: flags[i] != 0,
-                pointer_type: nsh_core::PointerType::Touch,
+                pointer_type: match c[i * 8 + 7] as u8 {
+                    1 => nsh_core::PointerType::Pen,
+                    2 => nsh_core::PointerType::Mouse,
+                    _ => nsh_core::PointerType::Touch,
+                },
+                // The lifted finger reports its last pressure: 0 as the DOM.
+                pressure: if flags[i] != 0 && phase >= 2 {
+                    0.0
+                } else {
+                    c[i * 8 + 4].clamp(0.0, 1.0)
+                },
+                tilt_x: c[i * 8 + 5],
+                tilt_y: c[i * 8 + 6],
             }
         })
         .collect();
@@ -1794,8 +1862,8 @@ extern "system" fn Java_com_longbridge_nsh_Native_eventMap(
         Some(PayloadValue::Number(n))
     };
     let payload = if kind == EventKind::FileRequest {
-        // "id", "error": the answer to an `OpenPath` (`SystemUi.openPath`;
-        // the paths of the request say nothing new, an open answers none).
+        // "id", "error", and repeated "path" keys: no path separator can
+        // be mistaken for a filename character, including newlines.
         let len = if keys.is_null() {
             0
         } else {
@@ -1803,6 +1871,7 @@ extern "system" fn Java_com_longbridge_nsh_Native_eventMap(
         };
         let mut id = None;
         let mut error = None;
+        let mut paths = Vec::new();
         for i in 0..len {
             let Ok(key) = env.get_object_array_element(&keys, i) else {
                 continue;
@@ -1816,6 +1885,7 @@ extern "system" fn Java_com_longbridge_nsh_Native_eventMap(
             match (key.as_str(), v) {
                 ("id", PayloadValue::Number(n)) => id = Some(n as u32),
                 ("error", PayloadValue::Str(message)) => error = Some(message),
+                ("path", PayloadValue::Str(path)) => paths.push(path.into()),
                 ("error", PayloadValue::Null) => {}
                 _ => {}
             }
@@ -1825,11 +1895,7 @@ extern "system" fn Java_com_longbridge_nsh_Native_eventMap(
         let Some(id) = id else {
             return;
         };
-        EventPayload::FileRequest {
-            id,
-            paths: Vec::new(),
-            error,
-        }
+        EventPayload::FileRequest { id, paths, error }
     } else if keys.is_null() {
         match read(&mut env, 0) {
             Some(v) => EventPayload::Value(v),
@@ -1890,6 +1956,8 @@ extern "system" fn Java_com_longbridge_nsh_Native_eventMap(
                 "positionMs" => "positionMs",
                 "truncated" => "truncated",
                 "buffering" => "buffering",
+                "action" => "action",
+                "target" => "target",
                 _ => continue,
             };
             if let Some(v) = read(&mut env, i) {

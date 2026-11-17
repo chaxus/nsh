@@ -34,20 +34,26 @@ go. Its requests use the platform's own network stack, as `fetch` does.
 ## checkForUpdate
 
 ```ts
-function checkForUpdate(): Promise<AppUpdate | null>;
+function checkForUpdate(options?: UpdateCheckOptions | null): Promise<AppUpdate | null>;
+
+interface UpdateCheckOptions {
+  channel?: string | null;
+}
 
 interface AppUpdate {
   version: string;
   notes?: string | null;
   url: string;
   canInstall: boolean;
+  shell: boolean;
 }
 ```
 
 Fetches the manifest from the source in `nsh.json` and resolves the newer version it describes, or `null` when the app
-is up to date, has no `"updater"`, or runs where apps do not update (the web, `nsh run`). A run on a
-[package](#checkforpackage) of that version or a later one is up to date too: the app's own version stays the one it
-shipped as, but its code is already the release's.
+is up to date, has no `"updater"`, or runs where apps do not update (the web, `nsh run`). It compares the installed
+app's own version, the one it shipped as. A run on a [package](#checkforpackage) of that version or a later one still
+gets the update, with `shell` true: its code is already the release's, and only the installed app (the runtime and
+native shell) is behind.
 
 | Field | Meaning |
 | --- | --- |
@@ -55,10 +61,29 @@ shipped as, but its code is already the release's.
 | `notes` | What changed, as the manifest's `--notes` file says it |
 | `url` | Where the user can get it by hand: the archive, or the store page on iOS and Android. Pass it to [`openUrl`](./nsh.md#openurl) when `canInstall` is false |
 | `canInstall` | Whether `downloadUpdate` and `installAndRestart` work in this run: a packaged desktop app installed where the user can write. False on iOS and Android, and under a directory only the system writes (a system package) |
+| `shell` | Whether only the installed app is behind: this run's [package](#checkforpackage) is already this version or later, so the update brings a newer runtime and native shell, not newer code. Apps that update by package can offer it as a quieter, optional step |
 
 It rejects when the source cannot be reached or its manifest is not acceptable: a bad or missing signature when
 `publicKey` is set, another app's id, a URL that is not HTTPS. A manifest of the same or an older version is not an
 update, so a stale manifest cannot downgrade the app.
+
+`channel` checks one of the [channels](#channels) `nsh.json` names instead of the default source. It is a name, never
+an address: a name the package does not declare rejects before any request. `downloadUpdate` and `installAndRestart`
+use what the last check found, whichever source it read.
+
+### Channels
+
+An app that offers early releases to the users who opt in declares a second manifest in `nsh.json`
+(`"channels": { "beta": "<url>" }`) and passes the user's choice to each check:
+
+```tsx
+const update = await checkForUpdate(wantsBeta() ? { channel: "beta" } : undefined);
+```
+
+Every channel is checked as the default source is: the same `publicKey`, the same id, and only a newer version is
+offered. Leaving a channel therefore never goes back: an app on `1.3.0-beta.2` that checks the default source again is
+offered `1.3.0`, not `1.2.0`. Publish each channel's manifest with `nsh update-manifest` as usual; a channel's
+archives' relative URLs resolve next to its own manifest.
 
 ## downloadUpdate
 
@@ -234,7 +259,8 @@ export const install = () =>
 
 `"updater"` names one source: `github`, an `owner/repo` whose latest GitHub Release holds `latest.json`, or `url`, the
 manifest on a host of your own, which requires `publicKey`. `publicKey` is the contents of an `nsh keygen` `.pub`
-file; with it, unsigned manifests are refused.
+file; with it, unsigned manifests are refused. `channels` names other manifests the app's code may
+[choose by name](#channels).
 
 ```json
 {
@@ -248,7 +274,8 @@ file; with it, unsigned manifests are refused.
 | --- | --- | --- |
 | `github` | string | `owner/repo`: the manifest is the asset `latest.json` of its latest release. Drafts and prereleases are skipped |
 | `url` | string | The manifest's HTTPS URL on your own host; archives' relative URLs resolve next to it |
-| `publicKey` | string | The Ed25519 key that signs the manifests (`latest.json.sig`). Required with `url` |
+| `channels` | object | Channel name (letters, digits, `-`, `_`, `.`) to the HTTPS URL of its manifest, for `checkForUpdate({ channel })`. Requires `publicKey` |
+| `publicKey` | string | The Ed25519 key that signs the manifests (`latest.json.sig`). Required with `url` and `channels` |
 | `packages.roots` | string[] | Root public keys (`nsh keygen`'s `root.pub`) whose certified release keys sign the app's [OTA packages](#ota-updates). Without it the app runs no packages |
 
 `nsh package` checks the keys and adds them, with the app's `build`, to the package, so the source is fixed when the

@@ -87,8 +87,9 @@ text("Run ")
 </Text>
 ```
 
-The Tailwind classes work the same way: `<Text class="bg-gray-100 rounded">`. Padding and borders are box styles and
-leave spans as they are; spaces inside the span give the box room on its sides.
+The Tailwind classes work the same way: `<Text class="bg-gray-100 rounded px-1">`. Horizontal padding takes room in the
+line at the span's two ends and its background covers it, as a CSS inline box's does; vertical padding grows the
+background above and below the text without changing the line's height, and borders leave spans as they are.
 
 ### Hidden spans
 
@@ -155,7 +156,8 @@ text("By continuing you agree to the ")
 
 Any other element inside a text (a view, an image, even inside spans) is an inline attachment: it is laid out at its
 own size, sits on the baseline (or where its `verticalAlign` style puts it: `"text-top"`, `"text-bottom"`,
-`"middle"`, as in CSS; the line grows to hold it) and wraps with the words. It takes presses of its own.
+`"middle"`, as in CSS; the line grows to hold it; on the baseline, a view that holds text stands by the baseline of
+its first line of text, as an `inline-flex` box) and wraps with the words. It takes presses of its own.
 
 ```rust tabs
 text("Made with ")

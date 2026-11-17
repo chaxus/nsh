@@ -99,7 +99,7 @@ fn app_config(
         limits: nsh_engine::Limits::default(),
         ui_sets,
         runtime: None,
-        data_dir: None,
+        support_dir: None,
         cache: nsh_engine::CacheOptions::off(),
         storage: None,
         clock: Default::default(),
@@ -112,6 +112,7 @@ fn app_config(
         audio: None,
         windows: None,
         login_item: None,
+        data_dir: None,
     }
 }
 
@@ -1546,37 +1547,49 @@ setTimeout(async () => {
 mount(() => <Text>{shown()}</Text>);
 "#;
 
+/// Android's backend, and a platform built outside NSH that says so
+/// (`Environment::clipboard_images`), hold text only on the clipboard.
 #[test]
 fn clipboard_images_are_unavailable_where_the_clipboard_holds_text_only() {
-    let (_engine, rx) = start_in(
-        CLIPBOARD_IMAGE_TEXT_ONLY,
-        Environment {
-            os: nsh_engine::Os::Android,
-            ..Environment::default()
-        },
-    );
-    // Writing and reading reject, `hasImage` answers no; nothing reaches
-    // the platform.
-    let wanted = "Error ERR_FEATURE_UNAVAILABLE_ON_PLATFORM | Error ERR_FEATURE_UNAVAILABLE_ON_PLATFORM | ok false";
-    let mut commands = 0;
-    let batches = until(&rx, |batch| {
-        commands += batch
-            .items
-            .iter()
-            .filter(|i| {
-                matches!(
-                    i,
-                    MountItem::Command {
-                        id: ROOT_ID,
-                        command: Command::SetClipboardImage(_) | Command::ReadClipboardImage { .. },
-                    }
-                )
-            })
-            .count();
-        shows(batch, wanted)
-    });
-    assert!(batches.iter().any(|b| shows(b, wanted)), "{wanted}");
-    assert_eq!(commands, 0, "an image call reached the platform");
+    // Android by its OS alone, as an environment that names only the OS
+    // has it; a platform built outside NSH by what it says.
+    for (os, platform, clipboard_images) in [
+        (nsh_engine::Os::Android, None, None),
+        (nsh_engine::Os::Ios, Some("miniprogram"), Some(false)),
+    ] {
+        let (_engine, rx) = start_in(
+            CLIPBOARD_IMAGE_TEXT_ONLY,
+            Environment {
+                os,
+                platform,
+                clipboard_images,
+                ..Environment::default()
+            },
+        );
+        // Writing and reading reject, `hasImage` answers no; nothing reaches
+        // the platform.
+        let wanted = "Error ERR_FEATURE_UNAVAILABLE_ON_PLATFORM | Error ERR_FEATURE_UNAVAILABLE_ON_PLATFORM | ok false";
+        let mut commands = 0;
+        let batches = until(&rx, |batch| {
+            commands += batch
+                .items
+                .iter()
+                .filter(|i| {
+                    matches!(
+                        i,
+                        MountItem::Command {
+                            id: ROOT_ID,
+                            command: Command::SetClipboardImage(_)
+                                | Command::ReadClipboardImage { .. },
+                        }
+                    )
+                })
+                .count();
+            shows(batch, wanted)
+        });
+        assert!(batches.iter().any(|b| shows(b, wanted)), "{os:?} {wanted}");
+        assert_eq!(commands, 0, "an image call reached the platform on {os:?}");
+    }
 }
 
 const CLIPBOARD_REFUSED: &str = r#"import { mount, signal, Text } from "nsh";
@@ -3218,7 +3231,7 @@ function App() {
   const changes = signal<boolean[]>([]);
   const parts = {
     trackClass: "w-[20px] checked:bg-[#00ff00]",
-    thumbClass: "w-[10px] checked:translate-x-[6px] disabled:opacity-50",
+    thumbClass: "w-[10px] checked:translate-x-[6px] disabled:opacity-50 active:w-[14px]",
   };
   return (
     <View>
@@ -3335,6 +3348,29 @@ fn a_base_switch_reports_the_next_value_and_styles_its_parts() {
     );
     let unchecked = std::slice::from_ref(&first);
     assert!(style(unchecked, thumb).transform.ops().is_empty());
+
+    // Held down (wherever on it): the parts' `active:` follows the
+    // switch's press as the platform reports it, until it is released.
+    let thumb_width = |b: &MountBatch| {
+        b.items.iter().rev().find_map(|i| match i {
+            MountItem::Frame { id, frame } if *id == thumb => Some(frame.size.width.0),
+            _ => None,
+        })
+    };
+    assert_eq!(thumb_width(&first), Some(10.0));
+    assert!(first.items.iter().any(|i| matches!(
+        i,
+        MountItem::TrackStates { id, states }
+            if *id == wifi && states & nsh_core::tailwind::state::PRESSED != 0
+    )));
+    engine
+        .control()
+        .set_states(wifi, nsh_core::tailwind::state::PRESSED);
+    let held = until(&rx, |b| thumb_width(b) == Some(14.0));
+    assert!(held.iter().any(|b| thumb_width(b) == Some(14.0)));
+    engine.control().set_states(wifi, 0);
+    let released = until(&rx, |b| thumb_width(b) == Some(10.0));
+    assert!(released.iter().any(|b| thumb_width(b) == Some(10.0)));
 
     // A press reports the next value; the app sets it, so the switch, its
     // `checkedStyle` and its parts' `checked:` classes follow.
@@ -5697,6 +5733,9 @@ fn a_base_slider_moves_the_nearer_thumb_and_tells_screen_readers_each_value() {
                 location: nsh_core::geometry::point(px(150.0), px(10.0)),
                 changed: true,
                 pointer_type: nsh_core::PointerType::Touch,
+                pressure: 0.5,
+                tilt_x: 0.0,
+                tilt_y: 0.0,
             }],
         }))
     };
@@ -5817,6 +5856,9 @@ fn a_base_sliders_drag_ends_on_the_apps_answer_to_its_last_move() {
                 location: at,
                 changed: true,
                 pointer_type: nsh_core::PointerType::Touch,
+                pressure: 0.5,
+                tilt_x: 0.0,
+                tilt_y: 0.0,
             }],
         }))
     };
@@ -6861,6 +6903,31 @@ fn the_tab_bar_renders_nothing_on_the_desktops_and_the_web() {
             .iter()
             .any(|batch| batch.items.iter().any(is_tab_bar));
         assert!(!platform, "no system bar on {os:?}, no component");
+    }
+    // A platform built outside NSH on iOS or Android without the system's
+    // tab bar: nothing mounts, and `isAvailable` sends the app to `Tabs`.
+    for os in [Os::Ios, Os::Android] {
+        let (_engine, rx) = start_in(
+            &app,
+            Environment {
+                os,
+                platform: Some("miniprogram"),
+                tab_bar: false,
+                ..Environment::default()
+            },
+        );
+        let batches = until(&rx, |batch| shows(batch, "Ready: false"));
+        assert!(
+            batches.iter().any(|batch| shows(batch, "Ready: false")),
+            "{os:?}"
+        );
+        let platform = batches
+            .iter()
+            .any(|batch| batch.items.iter().any(is_tab_bar));
+        assert!(
+            !platform,
+            "no system bar on miniprogram ({os:?}), no component"
+        );
     }
 }
 
@@ -12110,6 +12177,107 @@ fn the_menu_button_is_a_plain_button_off_ios() {
                 .items
                 .iter()
                 .any(|i| is_component(i, MENU_BUTTON_COMPONENT))),
+            "{os:?}"
+        );
+    }
+}
+
+const SYSTEM_CONTEXT_MENU: &str = r#"import { mount, signal, Text, View } from "nsh";
+import { ContextMenu, MenuItem } from "nsh/base";
+const chosen = signal("none");
+const pinned = signal(false);
+mount(() => <View>
+  <ContextMenu title="Notes.txt"
+    items={[
+      { id: "pin", label: "Pin", icon: "pin", checked: pinned() },
+      { id: "", label: "", inline: true, items: [
+        { id: "delete", label: "Delete", icon: "trash", destructive: true },
+      ] },
+    ]}
+    onOpenChange={({ open, reason }) => chosen.set(`${open} ${reason}`)}
+    onSelect={({ id }) => { chosen.set(id); if (id === "pin") pinned.set(true); }}
+    trigger={<View><Text>Note row</Text></View>}>
+    <MenuItem><Text>Drawn pin</Text></MenuItem>
+  </ContextMenu>
+  <Text>{`Chosen: ${chosen()}`}</Text>
+</View>);
+"#;
+
+/// `nsh/base`'s `ContextMenu` given `items` is the system's context menu on
+/// iOS: the items and title reach its component as data, its openings and
+/// the chosen item come back as `onOpenChange` and `onSelect({ id })`, and
+/// the new checks reach the same component.
+#[test]
+fn a_context_menu_with_items_gives_ios_its_menu_and_reports_the_choice() {
+    use nsh_core::platform::{CONTEXT_MENU_COMPONENT, Os};
+
+    let (engine, rx) = start_in(
+        SYSTEM_CONTEXT_MENU,
+        Environment {
+            os: Os::Ios,
+            ..Environment::default()
+        },
+    );
+    let initial = until(&rx, |batch| shows(batch, "Chosen: none"));
+    assert!(
+        initial.iter().any(|batch| shows(batch, "Note row")),
+        "the trigger shows"
+    );
+    let menu = component_id(&initial, CONTEXT_MENU_COMPONENT).expect("the system's menu");
+    let items = |pinned: bool| {
+        serde_json::json!([
+            { "id": "pin", "label": "Pin", "icon": "pin", "checked": pinned },
+            { "id": "", "label": "", "inline": true, "items": [
+                { "id": "delete", "label": "Delete", "icon": "trash", "destructive": true },
+            ] },
+        ])
+    };
+    assert_eq!(component_prop(&initial, menu, "items"), Some(items(false)));
+    assert_eq!(
+        component_prop(&initial, menu, "title"),
+        Some(serde_json::json!("Notes.txt"))
+    );
+    let native = |name: &str, data: serde_json::Value| {
+        engine.control().dispatch_event(
+            menu,
+            EventKind::NativeEvent,
+            EventPayload::Native {
+                name: name.into(),
+                data,
+            },
+        );
+    };
+    native("open", serde_json::json!("touch"));
+    until(&rx, |batch| shows(batch, "Chosen: true longPress"));
+    native("select", serde_json::json!("pin"));
+    let updates = until(&rx, |batch| shows(batch, "Chosen: pin"));
+    assert_eq!(component_prop(&updates, menu, "items"), Some(items(true)));
+}
+
+/// Elsewhere a context menu's items are not used: its children are the
+/// menu, and no iOS component is made.
+#[test]
+fn a_context_menu_draws_its_children_off_ios() {
+    use nsh_core::platform::{CONTEXT_MENU_COMPONENT, Os};
+
+    for os in [Os::MacOs, Os::Android] {
+        let (_engine, rx) = start_in(
+            SYSTEM_CONTEXT_MENU,
+            Environment {
+                os,
+                ..Environment::default()
+            },
+        );
+        let batches = until(&rx, |batch| shows(batch, "Chosen: none"));
+        assert!(
+            batches.iter().any(|batch| shows(batch, "Note row")),
+            "{os:?}"
+        );
+        assert!(
+            !batches.iter().any(|b| b
+                .items
+                .iter()
+                .any(|i| is_component(i, CONTEXT_MENU_COMPONENT))),
             "{os:?}"
         );
     }

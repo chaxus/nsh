@@ -4,7 +4,7 @@ const PLATFORM_PROPS = new Set(["ios", "android", "macos", "desktop", "web"]);
 
 export function createDom(invoke, values, reactive, live, wake) {
   const handlers = new WeakMap(), owners = new WeakMap(), heldProps = new WeakMap(), videos = new WeakSet(), streamed = new WeakSet();
-  let touches, measure, hot, platform, srcObjects;
+  let touches, measure, hot, platform, srcObjects, base;
   const prototype = Object.create(null);
   // A video's `srcObject` that is the browser's own `MediaStream` (an NSH
   // `HostStream` goes to the engine): the player plays it by view id. It
@@ -196,6 +196,9 @@ export function createDom(invoke, values, reactive, live, wake) {
     setPlatform(value) { platform = value; },
     setHot(value) { hot = value; },
     setSrcObjects(value) { srcObjects = value; },
+    // What `import.meta.url` resolves against: the page's base as the
+    // player started (`player.baseURL`), not the realm's document's.
+    setBase(value) { base = value; },
     rootProp: (name, value) => prop(root, name, value),
     listen(node, name, value) {
       let events = handlers.get(node);
@@ -205,7 +208,7 @@ export function createDom(invoke, values, reactive, live, wake) {
     },
     rt: { element: tag => { const node = call(300, [tag]); if (tag === "video") videos.add(node); return node; }, text: value => call(301, [String(value)]),
       prop, bindProp, insert, append, component, cond, each, merge, spread,
-      metaUrl: path => new URL(path, document.baseURI).href,
+      metaUrl: path => new URL(path, base ?? document.baseURI).href,
       ref,
     },
     mount(App, props) {

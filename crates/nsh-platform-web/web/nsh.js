@@ -20,7 +20,11 @@
 // instance of its own), `assetBase` (where `asset:/<path>` is served) or
 // `assets` (a map from `<path>` to its URL, as `nsh package --target web`
 // writes it; relative URLs, these and the others, resolve against the
-// page's `document.baseURI` as the player is made: `player.baseURL`),
+// page's `document.baseURI` as the player is made, or `baseURL`:
+// `player.baseURL`), `baseURL` (the site's base, which the app's relative
+// URLs and addresses resolve against instead of the page's: a page served
+// at its app's routes names it so, as a strict `base-uri` refuses a
+// `<base href>`),
 // `readAsset(uri)` (the bytes of an asset the engine needs at
 // once, a font: a `Uint8Array` or null), `data` (the URLs of the files the
 // runtime fetches when it first needs them, by name, as `nsh package
@@ -346,7 +350,7 @@ img.nsh-fill { pointer-events: none; }
 .nsh-dialog h3 { font-size: 17px; font-weight: 600; margin: 18px 16px 4px; }
 .nsh-dialog p { margin: 0 16px 18px; }
 .nsh-dialog button { display: block; width: 100%; border: 0; border-top: 0.5px solid rgba(0,0,0,.2); background: none;
-  font: 17px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: #007aff; padding: 11px; cursor: pointer; }
+  font: 17px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: #007aff; padding: 11px; cursor: default; }
 /* Dialogs on desktop browsers: the in-surface cards of the Linux and macOS backends. */
 .nsh-desktop .nsh-dialog-backdrop { background: rgba(0,0,0,.4); }
 .nsh-desktop .nsh-dialog { width: min(340px, calc(100% - 64px)); border-radius: 12px; padding: 20px; text-align: left;
@@ -389,7 +393,7 @@ img.nsh-fill { pointer-events: none; }
 .nsh-sheet > div { border-radius: 14px; background: rgba(245,245,245,.97); color: #000; overflow: hidden; text-align: center; }
 .nsh-sheet .nsh-sheet-head { padding: 12px 16px; color: #8a8a8e; border-bottom: 0.5px solid rgba(0,0,0,.2); }
 .nsh-sheet .nsh-sheet-head b { display: block; font-weight: 600; }
-.nsh-sheet button { display: block; width: 100%; border: 0; background: none; padding: 16px; cursor: pointer;
+.nsh-sheet button { display: block; width: 100%; border: 0; background: none; padding: 16px; cursor: default;
   font: 19px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: #007aff; }
 .nsh-sheet button + button { border-top: 0.5px solid rgba(0,0,0,.2); }
 .nsh-sheet button.cancel { font-weight: 600; }
@@ -439,7 +443,7 @@ img.nsh-fill { pointer-events: none; }
   border-left: 3px solid #ff6b6b; border-radius: 10px; white-space: pre-wrap; -webkit-user-select: text; user-select: text; }
 .nsh-error-copy { float: right; position: sticky; top: 0; margin: 0 0 6px 10px; border: 0; border-radius: 6px;
   background: rgba(255,255,255,.12); color: #fff; font: 600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  padding: 4px 12px; cursor: pointer; }
+  padding: 4px 12px; cursor: default; }
 .nsh-error-copy:hover { background: rgba(255,255,255,.2); }
 `;
 
@@ -485,6 +489,18 @@ function navigationIndex() {
 /** The offset of local time at `ms` (since the epoch) in seconds east of UTC. */
 function localOffset(ms) {
   return 0 - new Date(ms).getTimezoneOffset() * 60;
+}
+
+/**
+ * Whether the page can show the browser's share sheet: it has
+ * `navigator.share` and the page's permissions policy allows `web-share`
+ * (a frame of another origin needs `allow="web-share"`).
+ */
+function webShareAllowed() {
+  if (typeof navigator === "undefined" || typeof navigator.share !== "function") return false;
+  const doc = typeof document === "undefined" ? undefined : document;
+  const policy = doc?.permissionsPolicy ?? doc?.featurePolicy;
+  return typeof policy?.allowsFeature === "function" ? policy.allowsFeature("web-share") : true;
 }
 
 /** The browser's time zone (`Asia/Shanghai`), Intl's default; "" when unknown. */
@@ -545,19 +561,37 @@ const decoder = new TextDecoder();
  */
 const CLASSES = { sheets: {}, rules: new Map(), texts: new Map() };
 
+/** A style sheet of the runtime's own, after the page's and the earlier
+ * ones, holding `text`: a constructed sheet the document adopts, which a
+ * strict `style-src` allows (it refuses `<style>` elements), or in a
+ * browser without them a `<style>` element (`id`). */
+function runtimeSheet(id, text = "") {
+  if (typeof CSSStyleSheet === "function" && "replaceSync" in CSSStyleSheet.prototype && "adoptedStyleSheets" in document) {
+    const sheet = new CSSStyleSheet();
+    if (text) sheet.replaceSync(text);
+    document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+    return sheet;
+  }
+  const style = document.createElement("style");
+  style.id = id;
+  style.textContent = text;
+  document.head.append(style);
+  return style.sheet;
+}
+
 /** The sheet of the generated classes (`nsh-classes`), after the runtime's
  * own rules, or of the views' own rules (`nsh-own`): changing a rule makes
  * the browser go over its whole sheet again, so those that change are
  * apart. */
 function classSheet(id) {
-  if (!CLASSES.sheets[id]) {
-    const style = document.createElement("style");
-    style.id = id;
-    document.head.append(style);
-    CLASSES.sheets[id] = style.sheet;
-  }
+  if (!CLASSES.sheets[id]) CLASSES.sheets[id] = runtimeSheet(id);
   return CLASSES.sheets[id];
 }
+
+/** The document's sheet of the runtime's own rules ([`KEYFRAMES`]), made
+ * by the first player of any copy of the runtime on the page. */
+const RUNTIME_SHEET = Symbol.for("nsh.runtimeSheet");
+
 
 /** Adds (or, for a view's own rule, replaces) class `name` with `text`.
  * The class is doubled: it wins over the runtime's rules of a class and a
@@ -684,8 +718,8 @@ const glueImports = new Map();
  * every player after the first imports it under a URL of its own: another
  * instance of the module. The first keeps the URL the page preloads.
  */
-function importGlue(url) {
-  const href = new URL(String(url), document.baseURI);
+function importGlue(url, base) {
+  const href = new URL(String(url), base);
   const imported = glueImports.get(href.href) ?? 0;
   glueImports.set(href.href, imported + 1);
   if (imported > 0) href.searchParams.set("player", String(imported));
@@ -909,7 +943,7 @@ function frameViewport(frame, colorScheme) {
     frame.style.setProperty(name, value, "important");
   }
   try { frame.showPopover(); } catch (error) {
-    if (saved === null) frame.removeAttribute("style"); else frame.setAttribute("style", saved);
+    if (saved === null) frame.removeAttribute("style"); else frame.style.cssText = saved;
     if (popover === null) frame.removeAttribute("popover"); else frame.setAttribute("popover", popover);
     placeholder?.remove(); outer?.release(); throw error;
   }
@@ -919,7 +953,7 @@ function frameViewport(frame, colorScheme) {
     if (frame._nshViewport !== state || --state.users) return;
     observer.disconnect();
     frame.hidePopover();
-    if (saved === null) frame.removeAttribute("style"); else frame.setAttribute("style", saved);
+    if (saved === null) frame.removeAttribute("style"); else frame.style.cssText = saved;
     if (popover === null) frame.removeAttribute("popover"); else frame.setAttribute("popover", popover);
     unlock();
     placeholder?.remove(); outer?.release(); delete frame._nshViewport;
@@ -963,17 +997,17 @@ class Player {
     // app's relative URLs resolve against it once, so they still load
     // after the address moves to another directory (`history.pushState`
     // to `/sports/football`).
-    this.baseURL = document.baseURI;
+    // The site's base when the page names it (`baseURL`): the page's
+    // address is one of the app's routes, below it.
+    this.siteBase = options.baseURL == null ? null : new URL(String(options.baseURL), document.baseURI).href;
+    this.baseURL = this.siteBase ?? document.baseURI;
     this.assetBase = new URL(options.assetBase || "./", this.baseURL).href;
     const resolve = (urls) => urls && Object.fromEntries(Object.entries(urls).map(([key, url]) => [key, new URL(url, this.baseURL).href]));
     this.assets = resolve(options.assets);
     this.data = resolve(options.data);
     this.container = container;
-    if (!document.getElementById("nsh-style")) {
-      const style = document.createElement("style");
-      style.id = "nsh-style";
-      style.textContent = KEYFRAMES;
-      document.head.append(style);
+    if (!document[RUNTIME_SHEET]) {
+      Object.defineProperty(document, RUNTIME_SHEET, { value: runtimeSheet("nsh-style", KEYFRAMES) });
     }
     this.root = document.createElement("div");
     this.root.className = window.top === window ? "nsh-root" : "nsh-root nsh-embedded";
@@ -1048,7 +1082,7 @@ class Player {
     // the CLI ran `wasm-bindgen --target web` on the runtime, and its glue
     // provides the module's other imports. It loads while the module
     // compiles; a failed compile does not leave its rejection unhandled.
-    const glueLoad = this.options.glue ? importGlue(this.options.glue) : null;
+    const glueLoad = this.options.glue ? importGlue(this.options.glue, this.baseURL) : null;
     glueLoad?.catch(() => {});
     const imports = {
       env: {
@@ -1559,10 +1593,45 @@ class Player {
       this.measure.font = font;
       const t = this.measure.measureText("Hg");
       const x = this.measure.measureText("x");
-      m = [t.fontBoundingBoxAscent ?? 0, t.fontBoundingBoxDescent ?? 0, x.actualBoundingBoxAscent ?? 0];
+      // Ascent and descent as the DOM draws a run (`.nsh-run`: absolutely
+      // placed, `font` shorthand, so `line-height: normal`): where its
+      // baseline falls in its box. Canvas rounds its font box to whole
+      // pixels (Chrome), each font its own way, which put runs of two fonts
+      // on one line up to a pixel and a half apart on a phone.
+      const dom = this.domMetrics(font);
+      m = dom
+        ? [dom[0], dom[1], x.actualBoundingBoxAscent ?? 0]
+        : [t.fontBoundingBoxAscent ?? 0, t.fontBoundingBoxDescent ?? 0, x.actualBoundingBoxAscent ?? 0];
       this.metricsCache.set(font, m);
     }
     return m;
+  }
+
+  /** `[ascent, descent]` of a run in `font` as the DOM lays it out, or
+   * null without a document to measure in. */
+  domMetrics(font) {
+    if (typeof document === "undefined" || !document.body) return null;
+    let probe = this.metricsProbe;
+    if (!probe || !probe.box.isConnected) {
+      const box = document.createElement("div");
+      box.setAttribute("aria-hidden", "true");
+      box.style.cssText = "position:absolute;left:-10000px;top:0;visibility:hidden;pointer-events:none";
+      const run = document.createElement("span");
+      run.className = "nsh-run";
+      run.style.cssText = "left:0;top:0";
+      run.textContent = "Hg";
+      const mark = document.createElement("i");
+      mark.style.cssText = "display:inline-block;width:0;height:0;vertical-align:baseline";
+      run.append(mark);
+      box.append(run);
+      document.body.append(box);
+      probe = this.metricsProbe = { box, run, mark };
+    }
+    probe.run.style.font = font;
+    const top = probe.run.getBoundingClientRect();
+    const ascent = probe.mark.getBoundingClientRect().top - top.top;
+    if (!(top.height > 0)) return null;
+    return [ascent, top.height - ascent];
   }
 
   /**
@@ -2013,6 +2082,7 @@ class Player {
         : document.hasFocus() ? "active" : "inactive",
       timeZone: timeZoneName(),
       screenColor: typeof window.EyeDropper === "function",
+      share: webShareAllowed(),
       notifications: typeof window.Notification === "function",
       audio: typeof (window.AudioContext ?? window.webkitAudioContext) === "function",
       // Shader views draw until the first one finds no WebGL 2 (`shaderGl`).
@@ -2837,6 +2907,10 @@ class Player {
       pagePosition: { x: pageX, y: pageY },
       modifiers: { control: !!e.ctrlKey, alt: !!e.altKey, shift: !!e.shiftKey, platform: !!e.metaKey },
       pressedButton: held ? held[1] : null,
+      pointerType: e.pointerType === "pen" ? "pen" : "mouse",
+      pressure: e.pressure ?? (held ? 0.5 : 0),
+      tiltX: e.tiltX || 0,
+      tiltY: e.tiltY || 0,
     };
   }
 
@@ -2875,7 +2949,7 @@ class Player {
     let el = this.view(id);
     if (!el) return;
     el = this.retag(el, elementTag(props));
-    if (props.href != null) el.setAttribute("href", props.href);
+    if (props.href != null) el.setAttribute("href", this.siteBase ? this.linkHref(props.href) : props.href);
     else el.removeAttribute("href");
     el._props = props;
     // A list in its parent's viewport: its cells are read in screen order.
@@ -2904,7 +2978,10 @@ class Player {
   retag(el, tag) {
     if (el.localName === tag || (el._kind !== "view" && el._kind !== "text")) return el;
     const next = document.createElement(tag);
-    for (const { name, value } of el.attributes) next.setAttribute(name, value);
+    // Inline styles (a frame's) through the CSSOM: a strict `style-src`
+    // refuses a `style` attribute set as text.
+    for (const { name, value } of el.attributes) if (name !== "style") next.setAttribute(name, value);
+    if (el.style.cssText) next.style.cssText = el.style.cssText;
     for (const key of Object.keys(el)) next[key] = el[key];
     next.append(...el.childNodes);
     el.replaceWith(next);
@@ -5854,19 +5931,35 @@ class Player {
     return 0;
   }
 
+  /** A link's `href` under the site's base, as a `<base href>` would have
+   * it (the page's own address is one of the app's routes). */
+  linkHref(href) {
+    try {
+      return new URL(String(href), this.siteBase).href;
+    } catch {
+      return String(href);
+    }
+  }
+
+  /** What the app's relative addresses and links resolve against: the
+   * site's base (`baseURL`), else the page's current base, as
+   * `history.replaceState` resolves them. */
+  addressBase() {
+    return this.siteBase ?? document.baseURI;
+  }
+
   /** `UrlScheme.setUrl` / `set_app_url`: the current entry's address, once
    * the entries of the pages pushed or popped with it exist
    * (`syncHistory`); with `push` (`history: "push"`) an entry of its own
    * after it, unless the turn pushed a page's (which takes the address) or
    * it is the address shown. In one turn the last address wins, and a push
-   * wins over a replace. Resolved as `replaceState` resolves it (against
-   * `<base href>`); one of another origin is dropped (TS's `setUrl` throws
-   * for it first, in `runtime.js`). */
+   * wins over a replace. Resolved against `addressBase()`; one of another
+   * origin is dropped (TS's `setUrl` throws for it first, in `runtime.js`). */
   setPageUrl(url, push = false) {
     if (!this.history) return;
     let resolved;
     try {
-      resolved = new URL(url, document.baseURI);
+      resolved = new URL(url, this.addressBase());
     } catch {
       console.warn(`[nsh] the app's address is not a URL: ${url}`);
       return;
@@ -5963,8 +6056,7 @@ class Player {
       this.pageUrl = null;
       this.pageUrlPush = false;
       try {
-        // Resolved as `replaceState` does, against `<base href>` when the
-        // page has one.
+        // Absolute: `setPageUrl` resolved it.
         if (push) this.pushEntry(depth, url);
         else history.replaceState(history.state, "", url);
         this.shownUrl = url;
@@ -6527,7 +6619,9 @@ class Player {
       frame.removeAttribute("srcdoc");
       if (scroll) frame.removeAttribute("scrolling");
       else frame.setAttribute("scrolling", "no");
-      if (url) frame.src = url;
+      // A relative URL is the site's (`linkHref`), which no `<base href>`
+      // names when the page gives it to the player.
+      if (url) frame.src = this.siteBase ? this.linkHref(url) : url;
       else frame.removeAttribute("src");
     }
     // After the batch: its events may come after its props.
@@ -6746,6 +6840,8 @@ class Player {
         break;
       }
       case "zoomTo": if (el) this.zoomCommand(el, ...args); break;
+      case "setResponder": this.responderBlocks = !!args[0]; break;
+      case "clearResponder": this.responderBlocks = false; break;
       case "dialog": this.dialog(args[0], args[1], args[2], args[3], args[4] ?? [], args[5] ?? true, args[6] ?? false); break;
       case "reload": {
         const frame = el?._frameEl;
@@ -6796,6 +6892,7 @@ class Player {
       // Pages see no local paths: never any files.
       case "readClipboardFiles": this.event(ROOT_ID, "onClipboard", { id: args[0], has: false, files: "" }); break;
       case "pickScreenColor": this.pickScreenColor(args[0]); break;
+      case "share": this.share(args[0], args[1], args[2], args[3], args[4]); break;
       case "renderCanvas": this.renderCanvas(...args); break;
       case "pickImages": this.pickImages(args[0], args[1], args[2], args[3], args[4]); break;
       case "pickFiles": this.pickFiles(args[0], args[1], args[2], args[3]); break;
@@ -7021,6 +7118,43 @@ class Player {
       color = parseInt(sRGBHex.slice(1, 7), 16) * 256 + 255;
     } catch {}
     this.event(ROOT_ID, "onScreenColor", color === undefined ? { id: request } : { id: request, color });
+  }
+
+  // `share`: the browser's share sheet (`navigator.share`, which the
+  // environment's `share` reports). A page has no local files to share, and
+  // a browser that cannot share this content says so: both are reported as
+  // unavailable, never as shared. The user closing the sheet rejects with
+  // an `AbortError`: dismissed.
+  async share(request, title, text, url, files) {
+    const unavailable = (error) => this.event(ROOT_ID, "onShare",
+      { id: request, error, code: "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM" });
+    const data = {};
+    if (title != null) data.title = title;
+    if (text != null) data.text = text;
+    if (url != null) data.url = url;
+    if (files) return unavailable("share: a page shares no local files");
+    if (!webShareAllowed()) return unavailable("share: this browser has no share sheet for this page");
+    if (typeof navigator.canShare === "function" && !navigator.canShare(data)) {
+      return unavailable("share: this browser cannot share this content");
+    }
+    try {
+      await navigator.share(data);
+      this.event(ROOT_ID, "onShare", { id: request, action: "shared" });
+    } catch (err) {
+      if (err?.name === "AbortError") {
+        this.event(ROOT_ID, "onShare", { id: request, action: "dismissed" });
+      } else if (err?.name === "NotAllowedError") {
+        // The browser refuses the sheet here: the page's permissions policy
+        // (a frame without `web-share`) or a share without a user gesture.
+        unavailable(`share: the browser does not allow sharing here (${err?.message ?? err})`);
+      } else if (err?.name === "InvalidStateError") {
+        // An earlier share's sheet is still open: a browser shows one at a
+        // time and keeps it until the user closes it.
+        unavailable(`share: the browser still shows an earlier share (${err?.message ?? err})`);
+      } else {
+        this.event(ROOT_ID, "onShare", { id: request, error: `share: ${err?.message ?? err}` });
+      }
+    }
   }
 
   // Audio (`Sound`, `AudioPlayer`) -----------------------------------------
@@ -8231,6 +8365,14 @@ class Player {
     root.addEventListener("pointerdown", () => this.inputWith(1), true);
     window.addEventListener("keydown", (e) => MODALITY_KEYS_SKIPPED.has(e.key) || this.inputWith(0), true);
     root.addEventListener("pointerdown", (e) => this.pointerDown(e));
+    // A responder that blocks native scrolling (`setResponder`, a
+    // `TouchClaim`'s `block_native`) keeps its touches: the browser would
+    // scroll the scroll view around it and cancel them. One the browser
+    // already scrolls (`cancelable` false) stays the browser's, as a
+    // native scroll view that started dragging first takes them over.
+    root.addEventListener("touchmove", (e) => {
+      if (this.responderBlocks && e.cancelable) e.preventDefault();
+    }, { passive: false });
     // A link (`Link` with an `href`) is the app's to press: a plain click
     // stays in the app (its `onPress`), a click with a modifier or the
     // middle button opens its `href` as the browser would.
@@ -8731,10 +8873,16 @@ class Player {
     const pos = h ? el.scrollLeft : el.scrollTop;
     const max = h ? el.scrollWidth - el.clientWidth : el.scrollHeight - el.clientHeight;
     const page = (h ? el.clientWidth : el.clientHeight) * 0.875;
-    const d = { ArrowUp: -40, ArrowLeft: -40, ArrowDown: 40, ArrowRight: 40, PageUp: -page, PageDown: page,
-      " ": e.shiftKey ? -page : page, Home: -pos, End: max - pos }[k];
+    // The key's move, as `nsh_key_scroll` takes it: by points (0), by
+    // pages (1), to the start (2), to the end (3).
+    const [kind, amount] = { ArrowUp: [0, -40], ArrowLeft: [0, -40], ArrowDown: [0, 40], ArrowRight: [0, 40],
+      PageUp: [1, -1], PageDown: [1, 1], " ": [1, e.shiftKey ? -1 : 1], Home: [2, 0], End: [3, 0] }[k];
+    const d = [amount, amount * page, -pos, max - pos][kind];
     if (el._snapPoints) this.snapStep(el, Math.sign(d));
     else this.scrollSmoothly(el, h ? d : 0, h ? 0 : d, true);
+    // A list follows its real end from here on (rows never rendered are
+    // only estimated), and the other keys leave it.
+    this.call((w) => w.nsh_key_scroll(el._id, kind, amount));
     return true;
   }
 
@@ -9104,6 +9252,7 @@ class Player {
         y: p.y - top,
         changed: id === changedId,
         pointerType: p.pointerType,
+        pressure: p.pressure, tiltX: p.tiltX, tiltY: p.tiltY,
       });
     }
     if (!points.length) return;
@@ -9163,6 +9312,7 @@ class Player {
     const p = {
       x, y, layer, startX: x, startY: y, t: performance.now(), vx: 0, vy: 0,
       pointerType: e.pointerType,
+      pressure: e.pressure, tiltX: e.tiltX || 0, tiltY: e.tiltY || 0,
       touchPath: chain.filter((v) => v._events.has("onTouch")).map((v) => v._id),
       ...(isField ? { press: null } : link ? { press: link } : this.pickPress(chain)),
       // What presses report: the modifier keys at the press and its clicks.
@@ -9310,6 +9460,9 @@ class Player {
     p.x = x;
     p.y = y;
     p.t = now;
+    p.pressure = e.pressure;
+    p.tiltX = e.tiltX || 0;
+    p.tiltY = e.tiltY || 0;
     this.track(p, now);
     const tx = x - p.startX;
     const ty = y - p.startY;
@@ -9464,6 +9617,7 @@ class Player {
       return;
     }
     if (cancelled && p.scrolls?.length) this.touchScroll(p, this.point(e, p.layer));
+    p.pressure = 0;
     if (p.touchPath.length) this.touchEvent(cancelled ? 3 : 2, e.pointerId);
     this.pointers.delete(e.pointerId);
     if (this.twoFinger) {

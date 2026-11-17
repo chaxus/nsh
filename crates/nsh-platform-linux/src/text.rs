@@ -154,13 +154,13 @@ pub(crate) fn main_font_description(style: &ResolvedTextStyle) -> pango::FontDes
 fn resolve_family(name: &str, ui: &str) -> String {
     let mut out = String::with_capacity(name.len());
     use nsh_core::FamilyName;
-    for family in nsh_core::font_families(name) {
+    nsh_core::for_each_font_family(name, |family| {
         let family = match family {
             FamilyName::Monospace => "monospace",
             FamilyName::Serif => "serif",
             // Pango's list is comma-separated: a quoted name with a comma
             // in it can't be one of its families.
-            FamilyName::Named(f) if f.contains(',') => continue,
+            FamilyName::Named(f) if f.contains(',') => return,
             FamilyName::Named(f) => f,
             _ => ui,
         };
@@ -168,7 +168,7 @@ fn resolve_family(name: &str, ui: &str) -> String {
             out.push(',');
         }
         out.push_str(family);
-    }
+    });
     if out.is_empty() {
         out.push_str(ui);
     }
@@ -782,8 +782,9 @@ impl TextEngine for PangoTextEngine {
             } else {
                 self.attachment_font(context, text, a)
             };
-            let top = a.ascent(font, alignments.get(a.index));
-            let (up, down) = a.extent(font, alignments.get(a.index));
+            // By the baseline of its own text where it has one.
+            let top = alignments.ascent(a, font);
+            let (up, down) = alignments.extent(a, font);
             let (mut up, mut down) = (to_pango(up.0), to_pango(down.0));
             // With a fixed `lineHeight`, at least the box the text's runs
             // take (their font with the line height spread evenly above and
@@ -2215,22 +2216,43 @@ impl LinuxLayout {
             let Some(baseline) = runs.first().map(|r| r.baseline) else {
                 continue;
             };
-            let pieces = runs.iter().flat_map(|run| {
-                let mut gx = run.x;
-                let (ascent, descent) = run.font.extents;
-                run.glyphs.iter().map(move |g| {
-                    let x = gx;
-                    let width = from_pango(g.width);
-                    gx += width;
-                    nsh_core::LinePiece {
-                        x: Points(x),
-                        width: Points(width),
-                        background: text.background_at(g.index),
-                        ascent: Points(ascent),
-                        descent: Points(descent),
-                    }
+            let mut pieces: Vec<_> = runs
+                .iter()
+                .flat_map(|run| {
+                    let mut gx = run.x;
+                    let (ascent, descent) = run.font.extents;
+                    run.glyphs.iter().map(move |g| {
+                        let x = gx;
+                        let width = from_pango(g.width);
+                        gx += width;
+                        nsh_core::LinePiece {
+                            x: Points(x),
+                            width: Points(width),
+                            background: text.background_at(g.index),
+                            ascent: Points(ascent),
+                            descent: Points(descent),
+                        }
+                    })
                 })
-            });
+                .collect();
+            // Attachments hold no glyphs: their room (a span's padding
+            // too) is in the background of their span.
+            let range = line.info.start..line.info.end;
+            let before = pieces.len();
+            for (&(index, width), at) in self.attachment_extents.iter().zip(&self.attachments) {
+                if let (true, Some((x, _))) = (range.contains(&index), at) {
+                    pieces.push(nsh_core::LinePiece {
+                        x: Points(*x),
+                        width: Points(width),
+                        background: text.background_at(index),
+                        ascent: Points(0.0),
+                        descent: Points(0.0),
+                    });
+                }
+            }
+            if pieces.len() > before {
+                pieces.sort_by(|a, b| a.x.0.total_cmp(&b.x.0));
+            }
             let clip = (line.info.x, line.info.x + line.info.width);
             nsh_core::BackgroundBox::join(pieces, clip, |b| {
                 f(
@@ -2383,6 +2405,7 @@ mod tests {
 
     #[test]
     fn families() {
+        assert_eq!(resolve_family(r#"'A\\B', 'A\"B'"#, "X"), "A\\B,A\"B");
         assert_eq!(resolve_family("Inter", "Adwaita Sans"), "Inter");
         assert_eq!(resolve_family("system-ui", "Adwaita Sans"), "Adwaita Sans");
         assert_eq!(resolve_family("ui-monospace", "X"), "monospace");
@@ -2893,6 +2916,8 @@ mod tests {
                 color: nsh_core::Color(0xeeee_eeff),
                 radius: Points(4.0),
                 node: 4,
+                top: Default::default(),
+                bottom: Default::default(),
             }),
             ..style
         };

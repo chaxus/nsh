@@ -6,7 +6,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     rc::Rc,
     sync::Arc,
     time::Duration,
@@ -25,7 +25,9 @@ use super::{
     geometry::{DOC, Geometry, Hit},
     keys::{self, Move, Unit},
     node_view::{NodeView, NodeViewEvent},
-    session::{EditorSession, NodeViews, ViewGeometry, ViewRequest},
+    session::{
+        EditorSession, NodeViews, ViewGeometry, ViewRequest, parse_paste, paste_transaction,
+    },
     table::{TableGesture, TablePreview},
 };
 use crate::{
@@ -33,7 +35,8 @@ use crate::{
     rich_editor::{
         commands::base_keymap,
         extensions::{HistoryOptions, Keymap, KeymapOptions, history, starter},
-        formats::{DomParser, DomSerializer, slice_from_text, slice_to_text},
+        formats::{DomSerializer, slice_to_text},
+        js::{RichClipboardContent, SliceJson, paste_hooks},
         model::{Fragment, Mark, Node, SchemaSpec, Slice},
         state::{
             Affinity, ClickEvent, Decoration, EditorState, EditorStateConfig, GapCursor, KeyEvent,
@@ -171,10 +174,16 @@ pub(crate) struct Rv {
     sink: Rc<RefCell<Sink>>,
     next_composition: Rc<Cell<i64>>,
     drag: Rc<RefCell<Option<Drag>>>,
+    /// Pastes waiting for the app's JS paste hooks, in order (text, HTML).
+    pastes: Rc<RefCell<VecDeque<(String, String)>>>,
+    /// A task is pasting the waiting pastes.
+    pasting: Rc<Cell<bool>>,
     /// The content point less the page point of the last pointer over the
     /// content, and the scroll offset then: how a drag the app starts
     /// from a page point (a drag handle's) maps into the content.
     pointer: Rc<Cell<Option<PageOffset>>>,
+    /// A [`Rv::place`] measurement is in flight.
+    placing: Rc<Cell<bool>>,
     /// Where a drag that moves the selection would drop it (the drop
     /// cursor).
     pub(crate) drop_at: Signal<Option<usize>>,
@@ -192,6 +201,8 @@ pub(crate) struct Rv {
     pub(crate) viewport: Signal<Size<Points>>,
     /// The content box's height, how far the scroll view scrolls.
     pub(crate) content_height: Signal<Points>,
+    /// Intrinsic flow extent, without the content box's minimum viewport height.
+    pub(crate) document_size: Signal<Size<Points>>,
     /// A drag scrolling on its own past the viewport's edge.
     autoscroll: Rc<RefCell<AutoScroll>>,
     /// The state's scroll request was not carried out yet.
@@ -242,7 +253,10 @@ impl Rv {
             sink: Rc::default(),
             next_composition: Rc::new(Cell::new(1)),
             drag: Rc::default(),
+            pastes: Rc::default(),
+            pasting: Rc::default(),
             pointer: Rc::default(),
+            placing: Rc::default(),
             drop_at: signal(None),
             goal_x: Rc::default(),
             selected: Rc::default(),
@@ -253,6 +267,7 @@ impl Rv {
             scrolled: Rc::default(),
             viewport: signal(Size::default()),
             content_height: signal(px(0.0)),
+            document_size: signal(Size::default()),
             autoscroll: Rc::default(),
             scroll_pending: Rc::default(),
             blink_task: Rc::default(),
@@ -367,6 +382,34 @@ impl Rv {
             if rv.scroll_pending.get() {
                 untracked(|| rv.scroll_into_view());
             }
+        });
+        // Native layout reports many block/text frames in one commit. Apps
+        // need a settled size, not an event per paragraph: the change is
+        // reported once a frame, and only when the size differs from the
+        // last one reported. The owner cancels the pending frame on unmount.
+        let rv = self.clone();
+        let pending = Rc::new(Cell::new(false));
+        let reported = Rc::new(Cell::new(Size::<Points>::default()));
+        let owner = Owner::current();
+        effect(move || {
+            rv.document_size.get();
+            if pending.replace(true) {
+                return;
+            }
+            let (rv, pending, reported) = (rv.clone(), pending.clone(), reported.clone());
+            owner.run(|| {
+                spawn(async move {
+                    next_frame().await;
+                    pending.set(false);
+                    let size = rv.document_size.get_untracked();
+                    if size.width.0 <= 0.0 || size.height.0 <= 0.0 || reported.replace(size) == size
+                    {
+                        return;
+                    }
+                    rv.cx
+                        .emit(RichEditorEvent::ContentSizeChange { content_size: size });
+                })
+            });
         });
     }
 
@@ -665,15 +708,16 @@ impl Rv {
     /// shows at the caret, the document waits for the commit (one
     /// transaction, grouped in the history with the composition's).
     pub(crate) fn composition_changed(&self, composing: bool, text: &str) {
-        let held = {
+        let (held, changed) = {
             let mut sink = self.sink.borrow_mut();
+            let changed = sink.composing != composing;
             if composing && sink.composition.is_none() {
                 let id = self.next_composition.get();
                 self.next_composition.set(id + 1);
                 sink.composition = Some(id);
             }
             sink.composing = composing;
-            if composing { None } else { sink.held.take() }
+            (if composing { None } else { sink.held.take() }, changed)
         };
         self.session.set_composing(composing);
         if let Some(held) = held {
@@ -681,6 +725,11 @@ impl Rv {
         }
         self.composition
             .set((composing && !text.is_empty()).then(|| text.to_owned()));
+        // Observers can unmount the editor, so publish the transition only
+        // after its sink and composition state have reached their final values.
+        if changed {
+            self.cx.emit(RichEditorEvent::CompositionChange(composing));
+        }
     }
 
     /// A key the sink reports itself (soft keyboards: Backspace in an
@@ -1320,34 +1369,20 @@ impl Rv {
             return;
         }
         let state = self.session.state();
-        let from = state.selection().resolved_from().clone();
-        let in_code = from.parent().ty().spec().code;
-        let mut slice = None;
-        if !html.is_empty() && !in_code {
-            let mut html = html.to_owned();
-            for plugin in state.plugins() {
-                html = plugin.transform_pasted_html(&state, html);
+        // The app's JS hooks answer in a JS turn: the pastes wait in order
+        // and go in one after another once they did.
+        if state.plugins().iter().any(|p| paste_hooks(p).is_some()) {
+            self.pastes
+                .borrow_mut()
+                .push_back((text.to_owned(), html.to_owned()));
+            if !self.pasting.replace(true) {
+                let rv = self.clone();
+                spawn(async move { rv.drain_pastes().await });
             }
-            let parser = state
-                .some_prop(|p| p.clipboard_parser(&state))
-                .unwrap_or_else(|| DomParser::from_schema(state.schema()));
-            slice = Some(parser.parse_from_clipboard(&html, &from))
-                .filter(|s: &Slice| s.content.size() > 0);
+            return;
         }
-        let mut slice = match slice {
-            Some(slice) => slice,
-            None => {
-                if text.is_empty() {
-                    return;
-                }
-                let mut text = text.to_owned();
-                for plugin in state.plugins() {
-                    text = plugin.transform_pasted_text(&state, text, false);
-                }
-                state
-                    .some_prop(|p| p.clipboard_text_parser(&state, &text, &from, false))
-                    .unwrap_or_else(|| slice_from_text(state.schema(), &text, &from))
-            }
+        let Some(mut slice) = parse_paste(&state, text, html, false) else {
+            return;
         };
         for plugin in state.plugins() {
             slice = plugin.transform_pasted(&state, slice);
@@ -1355,13 +1390,113 @@ impl Rv {
         if self.some_hook(&state, |p, d| p.handle_paste(&state, &slice, d)) {
             return;
         }
-        let mut tr = state.tr();
-        tr.replace_selection(slice);
-        tr.set_origin(TransactionOrigin::Paste);
-        tr.set_meta("paste", Value::Bool(true));
-        tr.scroll_into_view();
-        self.dispatch(tr);
+        self.insert_paste(&state, slice);
+    }
+
+    /// Replaces the selection of `state` (the current one) with `slice`.
+    fn insert_paste(&self, state: &EditorState, slice: Slice) {
+        self.dispatch(paste_transaction(state, slice));
         self.empty_sink();
+    }
+
+    /// Pastes the waiting pastes in order, each once its JS hooks answered.
+    async fn drain_pastes(&self) {
+        loop {
+            let next = self.pastes.borrow_mut().pop_front();
+            let Some((text, html)) = next else { break };
+            self.paste_through_js(&text, &html).await;
+        }
+        self.pasting.set(false);
+    }
+
+    /// [`Rv::paste`] through plugins some of whose hooks are the app's JS
+    /// functions (`transformPasted`, `handlePaste`): the same steps in the
+    /// same order, each JS hook awaited (what it throws or answers wrong is
+    /// logged, and the step goes on as without it). A JS turn passes while
+    /// a hook answers: when the document or the selection changed
+    /// meanwhile (typing, another change of the app's), the content was
+    /// made for a place that is not the paste's any more, and the paste
+    /// starts over from the current state; one that keeps changing is
+    /// dropped after a few tries.
+    async fn paste_through_js(&self, text: &str, html: &str) {
+        const TRIES: usize = 3;
+        'paste: for _ in 0..TRIES {
+            let state = self.session.state();
+            if !self.editable() {
+                return;
+            }
+            let changed = |rv: &Rv| {
+                let now = rv.session.state();
+                !now.doc().ptr_eq(state.doc()) || !now.selection().eq(state.selection())
+            };
+            let schema = state.schema().clone();
+            let slice_of = |json: &Value| match Slice::from_json(&schema, json) {
+                Ok(slice) => Some(slice),
+                Err(e) => {
+                    log::warn!(
+                        "RichEditor: transformPasted's slice is not one of the schema's: {e}"
+                    );
+                    None
+                }
+            };
+            let Some(mut slice) = parse_paste(&state, text, html, false) else {
+                return;
+            };
+            let plugins: Vec<Plugin> = state.plugins().to_vec();
+            for plugin in &plugins {
+                slice = match paste_hooks(plugin).and_then(|h| h.transform) {
+                    Some(hook) => {
+                        let answered = hook.call_async(SliceJson(slice.to_json())).await;
+                        if changed(self) {
+                            continue 'paste;
+                        }
+                        answer(answered, "transformPasted")
+                            .and_then(|json| slice_of(&json.0))
+                            .unwrap_or(slice)
+                    }
+                    None => plugin.transform_pasted(&state, slice),
+                };
+            }
+            let clipboard = RichClipboardContent {
+                text: text.to_owned(),
+                html: html.to_owned(),
+            };
+            for plugin in &plugins {
+                let handled = match paste_hooks(plugin).and_then(|h| h.handle) {
+                    Some(hook) => {
+                        let answered = hook
+                            .call_async((SliceJson(slice.to_json()), clipboard.clone()))
+                            .await;
+                        let handled = answer(answered, "handlePaste").unwrap_or(false);
+                        // What a hook that handled the paste changed is its
+                        // own; one that did not leaves the paste to the
+                        // state now.
+                        if !handled && changed(self) {
+                            continue 'paste;
+                        }
+                        handled
+                    }
+                    // The state is the current one: every await above
+                    // checked it.
+                    None => {
+                        let mut trs = Vec::new();
+                        let handled = plugin.handle_paste(&state, &slice, &mut |tr| trs.push(tr));
+                        for tr in trs {
+                            self.dispatch(tr);
+                        }
+                        handled
+                    }
+                };
+                if handled {
+                    return;
+                }
+            }
+            self.insert_paste(&state, slice);
+            return;
+        }
+        log::warn!(
+            "RichEditor: a paste was dropped: the document kept changing while its hooks ran"
+        );
     }
 
     // Presses.
@@ -1386,13 +1521,22 @@ impl Rv {
             return;
         }
         let Some(hit) = self.hit(at) else { return };
-        let state = self.session.state();
-        let doc = state.doc().clone();
         let mod_key = if apple_keys() {
             modifiers.cmd
         } else {
             modifiers.ctrl
         };
+        // A press on an inline node view's own area selects its node, as one
+        // on a block's does (prosemirror-view's `selectClickedLeaf`); Shift
+        // and Mod keep their meaning (extend the selection, drag blocks).
+        let hit = match hit {
+            Hit::Text(..) if !modifiers.shift && !mod_key => {
+                self.inline_view_at(at).map_or(hit, Hit::Node)
+            }
+            hit => hit,
+        };
+        let state = self.session.state();
+        let doc = state.doc().clone();
         let click = ClickEvent {
             button: 0,
             mod_key,
@@ -1676,16 +1820,26 @@ impl Rv {
         ))
     }
 
-    /// Measures where the content is on the page (after a layout, and as a
-    /// handle drag starts): the offset page queries and handle drags map
-    /// by, before any pointer has been over the content.
+    /// Measures where the content is on the page (after a layout of the
+    /// editor or its content, after a page query, and as a handle drag
+    /// starts): the offset page queries and handle drags map by, before
+    /// any pointer has been over the content. What is around the editor
+    /// can move it (an outer scroll view, a sibling's layout) with no
+    /// layout of its own, so each page query measures again; one
+    /// measurement is in flight at a time.
     pub(crate) fn place(&self) {
+        if self.placing.replace(true) {
+            return;
+        }
         let content = self.content;
         let pointer = self.pointer.clone();
         let scroll = self.scroll_y;
         let drag = self.drag.clone();
+        let placing = self.placing.clone();
         spawn(async move {
-            if let Some(m) = content.measure().await {
+            let measured = content.measure().await;
+            placing.set(false);
+            if let Some(m) = measured {
                 let at = scroll.get_untracked();
                 let shift = Point::new(-m.page.x, -m.page.y);
                 pointer.set(Some((shift, at)));
@@ -2089,8 +2243,39 @@ impl Rv {
             .flatten()
             .find(|b| b.pos == pos)
             .map(|b| b.id);
-        id.and_then(|id| self.geo.borrow().origin(id))
+        let geo = self.geo.borrow();
+        // An inline node's box is where its one position is drawn.
+        id.and_then(|id| geo.origin(id))
+            .or_else(|| geo.range_rects(pos, pos + 1).first().map(|b| b.origin))
             .unwrap_or_default()
+    }
+
+    /// The inline node view whose box holds the content point `at`: its
+    /// node's position.
+    pub(crate) fn inline_view_at(&self, at: Point<Points>) -> Option<usize> {
+        let Some(Hit::Text(p, _)) = self.hit(at) else {
+            return None;
+        };
+        let state = self.session.state();
+        let doc = state.doc();
+        [p.checked_sub(1), Some(p)]
+            .into_iter()
+            .flatten()
+            .find(|&q| {
+                let viewed = doc.node_at(q).is_some_and(|n| {
+                    n.is_inline()
+                        && !n.is_text()
+                        && NodeSelection::is_selectable(&n)
+                        && self.node_view(n.ty().name()).is_some()
+                });
+                viewed
+                    && self.geo.borrow().range_rects(q, q + 1).iter().any(|b| {
+                        at.x >= b.origin.x
+                            && at.x < b.origin.x + b.size.width
+                            && at.y >= b.origin.y
+                            && at.y < b.origin.y + b.size.height
+                    })
+            })
     }
 
     // Focus and the caret.
@@ -2837,9 +3022,20 @@ impl ViewGeometry for GeometryHandle {
         }
         let tree = self.tree.borrow();
         let geo = self.geo.borrow();
-        let b = tree.children.values().flatten().find(|b| b.pos == pos)?;
+        let Some(b) = tree.children.values().flatten().find(|b| b.pos == pos) else {
+            // Not a block: an inline view or image, on its line.
+            return geo.inline_rect(pos);
+        };
         let origin = geo.origin(b.id)?;
         let (_, frame) = geo.frames.get(&b.id)?;
         Some(Bounds::new(origin, frame.size))
     }
+}
+
+/// What a paste hook of the app's answered, or `None` (logged) when it
+/// threw or answered something else.
+fn answer<T>(result: Result<T, String>, hook: &str) -> Option<T> {
+    result
+        .map_err(|e| log::warn!("RichEditor: {hook} threw or answered wrong: {e}"))
+        .ok()
 }

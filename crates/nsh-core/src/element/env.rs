@@ -76,6 +76,9 @@ pub struct Environment {
     /// The platform renders canvas drawings offscreen into images
     /// ([`crate::platform::Environment::canvas_render`]).
     pub canvas_render: bool,
+    /// The platform shows the system's share sheet
+    /// ([`crate::platform::Environment::share`]).
+    pub share: bool,
     /// The platform shows file dialogs and opens, reveals and trashes local
     /// paths ([`crate::platform::Environment::file_requests`]).
     pub file_requests: bool,
@@ -88,6 +91,9 @@ pub struct Environment {
     /// The platform plays sound
     /// ([`crate::platform::Environment::audio`]).
     pub audio: bool,
+    /// The platform shows the system's tab bar on iOS and Android
+    /// ([`crate::platform::Environment::tab_bar`]).
+    pub tab_bar: bool,
     /// The Cell size of a grid surface (a terminal): the core lays out in
     /// its Cells ([`crate::platform::Environment::cell`]); `None` elsewhere.
     pub cell: Option<Size<Points>>,
@@ -147,10 +153,12 @@ impl Default for Environment {
             wake_count: 0,
             screen_color: false,
             canvas_render: false,
+            share: false,
             file_requests: false,
             speech: false,
             notifications: false,
             audio: false,
+            tab_bar: true,
             cell: None,
             web_input: false,
             web_evaluate: false,

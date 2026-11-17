@@ -23,8 +23,9 @@
 //! themselves ([`Item`]): a press on them goes to them until it ends.
 //! Presses, pans and scroll drags never start on hosted items and text
 //! fields (they handle their own clicks, focus and selection drags), as
-//! native widgets keep theirs on Linux; mouse drags over selectable text
-//! select it rather than pan.
+//! native widgets keep theirs on Linux, except that an `Input` listening
+//! to presses hears its own (a view around it does not); mouse drags over
+//! selectable text select it rather than pan.
 //!
 //! Presses follow React Native and the other backends: the innermost view
 //! listening to press events gets them (or the pressable text span under
@@ -104,6 +105,8 @@ struct TwoFinger {
 const VK_TAB: u16 = 0x09;
 /// `VK_MENU` (Alt).
 const VK_MENU: u16 = 0x12;
+/// `VK_APPS` (the Menu key).
+pub(crate) const VK_APPS: u16 = 0x5D;
 /// The modifier keys' virtual key codes: Shift, Ctrl and Alt (and their
 /// left and right ones), and the Windows keys.
 const MODIFIER_KEYS: [u16; 11] = [
@@ -262,6 +265,7 @@ pub(crate) enum Cursor {
     /// No cursor (`cursor: none`).
     Hidden,
     /// A cursor of the system's or a page's (an `HCURSOR`): a web view's.
+    #[cfg_attr(not(feature = "webview"), allow(dead_code))]
     Native(isize),
 }
 
@@ -324,6 +328,11 @@ pub(crate) struct Input {
     /// A key with Alt was taken: Alt's release must not open the window
     /// menu.
     alt_combo: Cell<bool>,
+    /// The Menu key or Shift+F10 opened a context menu: the
+    /// `WM_CONTEXTMENU` Windows sends the window after the key is answered
+    /// ([`keyboard_context_menu_opened`]), so that it does not go on to the
+    /// window an embedded surface is in.
+    context_key: Cell<bool>,
     /// Next touch identifier.
     next_id: Cell<u32>,
     /// Next press generation (invalidates callbacks of earlier ones).
@@ -420,6 +429,42 @@ impl Item {
             }
         }
     }
+}
+
+/// What a touch or pen contact last reported besides its position
+/// (`WM_POINTER*`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PenSample {
+    /// A pen rather than a finger.
+    pub(crate) pen: bool,
+    /// From 0 to 1, when the device senses it.
+    pub(crate) pressure: Option<f32>,
+    /// A pen's tilt in degrees (x, y).
+    pub(crate) tilt: (f32, f32),
+}
+
+thread_local! {
+    static PEN_SAMPLES: RefCell<Vec<(u32, PenSample)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Keeps what contact `pointer` ([`PointerEvent::pointer`]) reported,
+/// `None` once it lifted.
+pub(crate) fn set_pen_sample(pointer: u32, sample: Option<PenSample>) {
+    PEN_SAMPLES.with_borrow_mut(|samples| {
+        samples.retain(|(id, _)| *id != pointer);
+        if let Some(sample) = sample {
+            samples.push((pointer, sample));
+        }
+    });
+}
+
+fn pen_sample(pointer: u32) -> Option<PenSample> {
+    PEN_SAMPLES.with_borrow(|samples| {
+        samples
+            .iter()
+            .find(|(id, _)| *id == pointer)
+            .map(|(_, s)| *s)
+    })
 }
 
 /// A pointer that is down.
@@ -954,7 +999,7 @@ fn context_menu(surface: &Rc<Surface>, x: f32, y: f32, modifiers: Modifiers) {
             return;
         }
         if input {
-            crate::text_input::context_menu(surface, &v);
+            crate::text_input::context_menu(surface, &v, None);
             return;
         }
         if (selectable || area) && !app_menu {
@@ -1278,7 +1323,9 @@ pub(crate) fn wheel(surface: &Rc<Surface>, event: WheelEvent) {
 /// surface shows, the app's keymap, the focused custom view's raw
 /// `KeyDown` and `capture_keys` rules ([`crate::keyboard`]), the
 /// application menu's shortcuts, and the native defaults (a focused
-/// field's editing, selectable text, navigation, scrolling, Tab). A
+/// field's editing, selectable text, navigation, scrolling, Tab), Return
+/// and Space pressing a focused control and the Menu key or Shift+F10
+/// opening the focus' context menu first. A
 /// capture consumes the key before the menu's shortcuts and defaults; a
 /// key the keymap took is not reported to the raw listeners too. A key up
 /// is reported to the focused custom view (or heard for Alt's release)
@@ -1301,6 +1348,8 @@ pub(crate) fn key(surface: &Rc<Surface>, event: KeyEvent) -> bool {
     }
     if !MODIFIER_KEYS.contains(&event.vk) {
         surface.chrome.context_area.take();
+        // Only the `WM_CONTEXTMENU` of this key is NSH's to answer.
+        input.context_key.set(false);
     }
     // The window's shortcuts (full screen, the dev host's reload) work
     // wherever the focus is.
@@ -1313,6 +1362,14 @@ pub(crate) fn key(surface: &Rc<Surface>, event: KeyEvent) -> bool {
         // The focused custom view's raw keys, and the capture rules that
         // take a key before the menu's shortcuts and the defaults.
         || crate::keyboard::press(surface, &event)
+        || crate::keyboard::activate(surface, &event)
+        || {
+            let opened = crate::keyboard::context_menu(surface, &event);
+            if opened {
+                input.context_key.set(true);
+            }
+            opened
+        }
         || crate::chrome::shortcut(surface, &event)
         || crate::text_input::key(surface, &event)
         || crate::text::key(surface, &event)
@@ -1328,6 +1385,16 @@ pub(crate) fn key(surface: &Rc<Surface>, event: KeyEvent) -> bool {
         input.alt_combo.set(true);
     }
     handled
+}
+
+/// Whether a key (the Menu key or Shift+F10) opened a context menu since
+/// the last time this was asked: Windows then sends the window a
+/// `WM_CONTEXTMENU` of its own for the key, which the window answers
+/// rather than handing it to `DefWindowProc` (which passes it on to the
+/// parent window of an embedded surface, where the host could open a menu
+/// of its own over NSH's).
+pub(crate) fn keyboard_context_menu_opened(surface: &Surface) -> bool {
+    surface.input.context_key.replace(false)
 }
 
 /// Tab and Shift + Tab move the keyboard focus between the stops, in tree
@@ -1678,10 +1745,19 @@ fn down(
         gate,
         ..
     } = grab;
-    let press = if native {
+    // A text field takes its own clicks (focus, caret, selection drags);
+    // the `Input` itself hears them as a press too (a combobox opens its
+    // list), but no view around it does.
+    let input_view = matches!(item, Some(Item::Input(_)));
+    let press = if native && !input_view {
         None
     } else {
-        find_press(surface, &hit.view, &views, x, y).map(|p| p.clicked(modifiers.core(), clicks))
+        let pressable = if input_view {
+            std::slice::from_ref(&hit.view)
+        } else {
+            &views[..]
+        };
+        find_press(surface, &hit.view, pressable, x, y).map(|p| p.clicked(modifiers.core(), clicks))
     };
     let id = input.next_id.get();
     input.next_id.set(id.wrapping_add(1));
@@ -1930,6 +2006,10 @@ fn report(surface: &Surface, phase: TouchPhase, changed: &Pointer, activated: Op
             .map(|p| {
                 let is_changed = std::ptr::eq(p, changed);
                 let (lx, ly) = local(&p.target, p.x, p.y);
+                let sample = match p.key {
+                    Key::Touch(id) => pen_sample(id),
+                    Key::Mouse => None,
+                };
                 TouchPoint {
                     id: p.id,
                     target: p.target.id(),
@@ -1942,11 +2022,22 @@ fn report(surface: &Surface, phase: TouchPhase, changed: &Pointer, activated: Op
                     page: point(Points(p.x), Points(p.y)),
                     location: point(Points(lx), Points(ly)),
                     changed: is_changed,
-                    pointer_type: if p.key == Key::Mouse {
-                        nsh_core::PointerType::Mouse
-                    } else {
-                        nsh_core::PointerType::Touch
+                    pointer_type: match (p.key, sample.map(|s| s.pen)) {
+                        (Key::Mouse, _) => nsh_core::PointerType::Mouse,
+                        (Key::Touch(_), Some(true)) => nsh_core::PointerType::Pen,
+                        (Key::Touch(_), _) => nsh_core::PointerType::Touch,
                     },
+                    pressure: match sample.and_then(|s| s.pressure) {
+                        Some(pressure)
+                            if !(is_changed
+                                && matches!(phase, TouchPhase::End | TouchPhase::Cancel)) =>
+                        {
+                            pressure
+                        }
+                        _ => TouchPoint::default_pressure(phase, is_changed),
+                    },
+                    tilt_x: sample.map_or(0.0, |s| s.tilt.0),
+                    tilt_y: sample.map_or(0.0, |s| s.tilt.1),
                 }
             })
             .collect()
@@ -2841,6 +2932,51 @@ mod tests {
         let input = view(&area, 12, ViewKind::Input, rect(0.0, 60.0, 200.0, 20.0));
         input.state_mut().events.set(EventKind::ContextMenu, true);
         assert!(menu_area(&input).is_none());
+    }
+
+    /// A click on a text field starts a press on its `Input` when it
+    /// listens (a combobox opens its list), never on a view around it.
+    #[test]
+    fn a_click_on_an_input_presses_only_the_input() {
+        let surface = Surface::new(nsh_core::platform::Environment::default());
+        surface.root.state_mut().frame = rect(0.0, 0.0, 400.0, 400.0);
+        let row = view(
+            &surface.root,
+            2,
+            ViewKind::View,
+            rect(0.0, 0.0, 400.0, 100.0),
+        );
+        row.state_mut().events.set(EventKind::Press, true);
+        let listening = view(&row, 4, ViewKind::Input, rect(0.0, 0.0, 200.0, 40.0));
+        listening.state_mut().events.set(EventKind::Press, true);
+        view(&row, 6, ViewKind::Input, rect(0.0, 50.0, 200.0, 40.0));
+        let pressed = |y: f32| {
+            let event = |kind| PointerEvent {
+                kind,
+                x: 10.0,
+                y,
+                button: 0,
+                buttons: if kind == PointerKind::Down { 1 } else { 0 },
+                pointer: 1,
+                touch: false,
+                pen: false,
+                time: 0.0,
+                clicks: 1,
+                modifiers: Modifiers::default(),
+            };
+            pointer(&surface, event(PointerKind::Down));
+            let node = surface
+                .input
+                .pointers
+                .borrow()
+                .first()
+                .and_then(|p| p.press.as_ref().map(|press| press.node));
+            pointer(&surface, event(PointerKind::Up));
+            node
+        };
+        assert_eq!(pressed(10.0), Some(4));
+        // A field that does not listen: the row around it is not pressed.
+        assert_eq!(pressed(60.0), None);
     }
 
     #[test]

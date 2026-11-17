@@ -88,6 +88,10 @@ fn show(container: &UIView) -> AppView {
 `NshAppView` 的成员对应；`AppView::set_locale`、`set_font_scale` 和 `set_error_handler` 对应 `locale`、`fontScale` 和 `onError`。
 `nsh package --target ios` 会为你构建这种应用，并挂载好根组件。
 
+不调用 `set_ui_sets` 时，`AppView` 提供 `nsh/base` 的核心部分（`Button`、`Checkbox`、`Switch`、`Tabs`、`Slider`、`AlertDialog`、
+导航、`Input` 等），这已足够 Rust 根组件使用，因为 Rust 按类型创建 `nsh/base` 的组件。视图加载的 TSX 若导入 `nsh/base`
+的更多组件（`Select`、`TextView`、`EmojiPicker` 等），就像上例那样传入完整的 `nsh_base::registry()`。
+
 ## 获取 framework
 
 发行包中包含两个版本：
@@ -113,6 +117,10 @@ cargo xtask ios-embed --dynamic
 
 默认情况下，每个 XCFramework 包含三个 arm64 切片：iOS 真机、iOS 模拟器（Apple 芯片）和 Mac Catalyst。最低部署目标为 iOS 15.0。Swift
 模块启用了 library evolution 编译，因此用其他版本 Swift 编译器构建的应用也能导入它；framework 已链接了它需要的一切，你无需再添加其他东西。
+
+`NshAppView` 为它运行的应用提供完整的 `nsh/base`（包括 `nsh/base/plot`），与 Android 的 `NshView` 一样：应用可以导入其中任何组件。
+宿主应用若用自己的 Rust 代码构建运行时，可以在创建第一个视图之前用 `nsh_platform_ios::set_ui_sets` 选择 UI 集合
+（[嵌入 Rust 应用](#嵌入-rust-应用)）。
 
 ## 加入 Xcode 项目
 
@@ -200,6 +208,7 @@ final class EmbedController: UIViewController {
 | `init(frame: CGRect = .zero, trace: Bool = false)` | 创建视图。`trace` 会记录每次提交的耗时。`init?(coder:)` 支持 storyboard 和 nib。 |
 | `onError: ((String) -> Void)?` | 在主线程上接收应用的致命错误（bundle 加载失败、未捕获的 JS 异常、VM 因触及限制而停止）。错误总会写入日志；开发构建还会把错误显示在应用上方。 |
 | `limits: NshLimits` | 此后加载的应用的 VM 限制。 |
+| `handoff: Bool` | 把此后加载的应用用 [`UrlScheme.setUrl`](../modules/nsh.md#handoff) 设置的地址交给系统，Handoff 可以在用户的其他设备上接着打开它。应用自己 scheme 的地址需要在你的 Info.plist 的 `NSUserActivityTypes` 中声明 `<bundle id>.url`，它会带着 `userInfo["url"]` 中的 URL 回到另一台设备的 `scene(_:continue:)`：把它传给 `openURL(_:)`。默认关闭。 |
 | `grantCapabilities(_ json: String?) throws` | 此后加载的应用最多能做什么，JSON 格式与 `nsh.json` 的 `capabilities` 相同；`nil` 表示授予每个应用所声明的能力。JSON 无效时抛出 `NshError`。 |
 | `locale: Locale?` | 代替用户设置的语言和地区：`Intl`、`locale()` 和组件立即跟随，此后加载的应用也从它开始。`nil` 跟随系统。 |
 | `fontScale: CGFloat?` | 代替动态字体的文字大小（1 为默认）：文字和输入框按它重新排版，`fontScale()` 读到它，立即生效，此后加载的应用也一样；长度保持原样。`nil` 跟随系统。 |
@@ -225,7 +234,7 @@ final class EmbedController: UIViewController {
 > `bundle.nshc`（字节码）只能从应用包内部加载。QuickJS 不校验字节码，其他来源的字节码可能破坏内存：对于应用包之外的文件，请加载
 > `bundle.js`（JS 源码），更好的做法是使用[签名包](./signed-packages.md)。
 
-`limits`、`grantCapabilities`、`storageDirectory` 和 `cacheOptions` 从下一次加载开始生效：请在 `loadBundle` / `run` 之前设置。
+`limits`、`handoff`、`grantCapabilities`、`storageDirectory` 和 `cacheOptions` 从下一次加载开始生效：请在 `loadBundle` / `run` 之前设置。
 
 每个应用无需任何设置就按自己的 id 保存存储：签名包使用其发布密钥证书担保的 id，bundle 使用其 `nsh.json` 中的 `id`（`nsh build` 写在它旁边的 `app.json`）。如果宿主想把应用的数据放到自己选择的位置，设置 `storageDirectory`：
 

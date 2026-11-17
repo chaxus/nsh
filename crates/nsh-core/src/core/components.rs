@@ -686,6 +686,10 @@ pub(super) struct Components {
     /// Colors being picked on the screen, by request id: their answers.
     screen_colors: FxHashMap<u32, AnswerSlot<Option<crate::Hsla>>>,
     next_screen_color: u32,
+    /// The shares waiting for the platform's answer
+    /// ([`crate::EventKind::Share`]), by request.
+    shares:
+        FxHashMap<u32, AnswerSlot<Result<crate::share::ShareOutcome, crate::share::ShareError>>>,
     /// Requests on local paths (`pick_paths`, `open_path`, ...), by
     /// request id: their answers.
     file_requests: FxHashMap<u32, FileAnswer>,
@@ -810,6 +814,7 @@ impl Default for Components {
             next_url_open: 0,
             screen_colors: FxHashMap::default(),
             next_screen_color: 1,
+            shares: FxHashMap::default(),
             file_requests: FxHashMap::default(),
             next_file_request: 1,
             next_clipboard_read: 1,
@@ -2448,6 +2453,17 @@ impl<M: TextEngine> Core<M> {
             at = owner.parent();
         }
         None
+    }
+
+    /// The window the component that runs once under `owner` shows in (its
+    /// root node), the main window's when there is none.
+    fn window_of_owner(&self, owner: crate::element::Owner) -> NodeId {
+        if self.window_ids.is_empty() {
+            return crate::ROOT_ID;
+        }
+        self.host_of_owner(owner)
+            .and_then(|host| self.key(host).ok())
+            .map_or(crate::ROOT_ID, |key| self.key_window(key))
     }
 
     /// Makes `inst`'s view on `host` (once: a view made already takes its
@@ -6283,7 +6299,6 @@ impl<M: TextEngine> Core<M> {
                 // Checked where the app called (`set_app_url`, `setUrl`);
                 // where the app is the page, the address stays of its
                 // origin (both refuse others first).
-                let web = self.components.environment.os == crate::platform::Os::Web;
                 let address = self.components.url_schemes.address.clone();
                 if let Some(base) = address.page_base()
                     && !crate::url_scheme::same_origin(Some(base.as_str()), &url)
@@ -6294,17 +6309,17 @@ impl<M: TextEngine> Core<M> {
                 // Again for `setUrl`, which wrote it as it was called: in
                 // order with the page's address the core took since.
                 address.set(url.clone());
-                // Only the web shows an address (its history entries).
-                if web {
-                    let command = match history {
-                        crate::url_scheme::HistoryBehavior::Push => Command::PushAppUrl(url),
-                        _ => Command::SetAppUrl(url),
-                    };
-                    let _ = self.apply_op(Op::Command {
-                        id: crate::ROOT_ID,
-                        command,
-                    });
-                }
+                // The platform shows it: the web in its history entries,
+                // iOS and macOS to the system when the app opts in
+                // (Handoff).
+                let command = match history {
+                    crate::url_scheme::HistoryBehavior::Push => Command::PushAppUrl(url),
+                    _ => Command::SetAppUrl(url),
+                };
+                let _ = self.apply_op(Op::Command {
+                    id: crate::ROOT_ID,
+                    command,
+                });
             }
             Action::WebInputAvailable(answer) => {
                 let available =
@@ -6346,6 +6361,11 @@ impl<M: TextEngine> Core<M> {
                     command: Command::PickScreenColor { id },
                 });
             }
+            Action::Share(request, answer) => self.start_share(request, answer),
+            Action::ShareAvailable(answer) => {
+                let available = self.components.environment.share && self.access.allows_share();
+                answer.borrow_mut().deliver(available);
+            }
             Action::RenderCanvas(request, answer) => self.start_canvas_render(*request, answer),
             Action::FileRequest(request, answer) => {
                 use crate::file_dialog::FileRequest;
@@ -6378,6 +6398,61 @@ impl<M: TextEngine> Core<M> {
                 });
             }
         }
+    }
+
+    /// Checks `request` and sends it to the platform's share sheet
+    /// ([`crate::share`]); `answer` gets how it ended. Request ids are
+    /// unique in the process, as offscreen renders' are: a sheet still
+    /// open when a hot reload replaced the core must not answer the new
+    /// core's request of the same number.
+    fn start_share(
+        &mut self,
+        request: crate::share::ShareRequest,
+        answer: AnswerSlot<Result<crate::share::ShareOutcome, crate::share::ShareError>>,
+    ) {
+        use crate::share::{ShareError, ShareOutcome};
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+        let refused = if !self.components.environment.share {
+            Some(ShareError::unavailable("this platform has no share sheet"))
+        } else if !self.access.allows_share() {
+            Some(ShareError {
+                code: Some(crate::element::codes::ACCESS_DENIED.into()),
+                message: crate::share::NOT_GRANTED.into(),
+            })
+        } else {
+            request.check().err().map(ShareError::failed)
+        };
+        if let Some(error) = refused {
+            answer.borrow_mut().deliver(Err(error));
+            return;
+        }
+        // One sheet at a time: the one still showing ends as dismissed and
+        // the platform replaces it, so a sheet the platform never answered
+        // cannot hold every later share back.
+        for (_, earlier) in self.components.shares.drain() {
+            earlier.borrow_mut().deliver(Ok(ShareOutcome::dismissed()));
+        }
+        // The anchor goes to the platform as a view it shows, which it
+        // places the sheet at wherever that view is (a modal, a window).
+        let anchor = request.anchor.filter(|&node| {
+            self.key(node).is_ok_and(|key| {
+                self.nodes[key as usize].created && (key == self.root || self.in_tree(key))
+            })
+        });
+        let id = loop {
+            let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if id != 0 {
+                break id;
+            }
+        };
+        self.components.shares.insert(id, answer);
+        let _ = self.apply_op(Op::Command {
+            id: crate::ROOT_ID,
+            command: Command::Share {
+                id,
+                sheet: Box::new(crate::share::ShareSheet::new(request, anchor)),
+            },
+        });
     }
 
     /// Applies what the downloads ask of the core
@@ -7033,6 +7108,15 @@ impl<M: TextEngine> Core<M> {
                 }
                 true
             }
+            EventKind::Share if id == crate::ROOT_ID => {
+                let Some((request, result)) = crate::share::answer_from_payload(payload) else {
+                    return false;
+                };
+                if let Some(answer) = self.components.shares.remove(&request) {
+                    answer.borrow_mut().deliver(result);
+                }
+                true
+            }
             EventKind::CanvasImage if id == crate::ROOT_ID => self.answer_canvas_render(payload),
             EventKind::FileRequest if id == crate::ROOT_ID => {
                 let EventPayload::FileRequest {
@@ -7213,7 +7297,17 @@ impl<M: TextEngine> Core<M> {
         }
         let views = {
             let _entered = self.components.runtime.enter();
-            keys.bindings()
+            // Bindings share a few owners (a component's effect binds many):
+            // each is looked up once.
+            let mut known: Vec<(crate::element::Owner, NodeId)> = Vec::new();
+            keys.bindings(|owner| {
+                if let Some(&(_, window)) = known.iter().find(|(o, _)| *o == owner) {
+                    return window;
+                }
+                let window = self.window_of_owner(owner);
+                known.push((owner, window));
+                window
+            })
         };
         drop(keys);
         let bindings = self

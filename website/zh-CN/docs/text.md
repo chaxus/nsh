@@ -104,21 +104,21 @@ Span 的背景色和圆角会在它所在的每一行、字符后面画一个与
 
 ```rust tabs
 text("先运行 ")
-    .child(text(" npm test ").font_family("ui-monospace").bg(rgb(0xeff1f3)).rounded(px(4.0)))
+    .child(text("npm test").font_family("ui-monospace").bg(rgb(0xeff1f3)).rounded(px(4.0)).px(px(4.0)))
     .child("。")
 ```
 
 ```tsx tabs
 <Text>
-  先运行 <Text style={{ fontFamily: "ui-monospace", backgroundColor: "#eff1f3", borderRadius: 4 }}> npm test </Text>。
+  先运行 <Text style={{ fontFamily: "ui-monospace", backgroundColor: "#eff1f3", borderRadius: 4, paddingHorizontal: 4 }}>npm test</Text>。
 </Text>
 ```
 
-Span 没有自己的盒子，写在 span 上的 padding 会被忽略（并给出警告）。要给背景留出左右空间，就在 span 两端放空格；窄不换行空格（`"\u202F"`）或细空格（`"\u2009"`）比普通空格更窄。`fontSize` 用相对值时，span 无论放在哪里都和所在段落保持比例：
+span 上的水平 padding 会在它两端的行内占位，背景也覆盖这段空间，与 CSS 行内盒一致；垂直 padding 会让背景向文字上下延伸，但不改变行高；边框对 span 不起作用。`fontSize` 用相对值时，span 无论放在哪里都和所在段落保持比例：
 
 ```tsx
 <Text style={{ fontSize: 16 }}>
-  运行 <Text style={{ fontSize: "0.875em", backgroundColor: "#eff1f3", borderRadius: 4 }}>{"\u202Fnpm test\u202F"}</Text>。
+  运行 <Text style={{ fontSize: "0.875em", backgroundColor: "#eff1f3", borderRadius: 4, paddingHorizontal: 3 }}>npm test</Text>。
 </Text>
 ```
 
@@ -174,6 +174,17 @@ text("Made with ")
 ```tsx
 <Text style={{ fontSize: 16 }}>
   <Image src={badge} style={{ width: 16, height: 16, verticalAlign: "text-bottom" }} /> 认证卖家
+</Text>
+```
+
+在基线上时，内部有文字的视图以其首行文字的基线站在所在行上，与 CSS 摆放 `inline-block` 或 `inline-flex` 盒子的方式一致：句子里的胶囊、标签或 @ 提及，不论内边距和字号多大，其中的文字都与周围文字落在同一条线上，所在行会为视图在这条基线上方和下方的部分留出空间。没有文字的视图（图片、色块）以自己的底边站在基线上，与图片一样。
+
+```tsx
+<Text style={{ fontSize: 15, lineHeight: 24 }}>
+  今天加仓了{" "}
+  <View style={{ flexDirection: "row", paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 }}>
+    <Text style={{ fontSize: 13 }}>NVDA</Text>
+  </View>
 </Text>
 ```
 

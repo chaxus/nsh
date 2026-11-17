@@ -2849,6 +2849,19 @@ final class Mounter {
                 Picker.show(context, request);
                 break;
             }
+            case 57: {
+                Picker.Request request = new Picker.Request();
+                request.id = b.getInt();
+                request.limit = b.getInt() != 0 ? Integer.MAX_VALUE : 1;
+                request.folders = b.getInt() != 0;
+                String extensions = (String) objects[b.getInt()];
+                request.extensions = extensions.isEmpty() ? new String[0] : extensions.split(",");
+                request.files = true;
+                request.paths = this;
+                request.view = host;
+                Picker.show(context, request);
+                break;
+            }
             case 45: {
                 Picker.Request request = new Picker.Request();
                 request.id = b.getInt();
@@ -2903,6 +2916,23 @@ final class Mounter {
             }
             case 47: {
                 audio().command(b, objects);
+                break;
+            }
+            case 58: {
+                // `encode.rs` `Command::Share`: the request, the title and the
+                // text (each after whether it is there), then the files.
+                Share.Request request = new Share.Request();
+                request.id = b.getInt();
+                boolean hasTitle = b.getInt() != 0;
+                String title = (String) objects[b.getInt()];
+                boolean hasText = b.getInt() != 0;
+                String text = (String) objects[b.getInt()];
+                request.title = hasTitle ? title : null;
+                request.text = hasText ? text : null;
+                request.files = new String[b.getInt()];
+                for (int i = 0; i < request.files.length; i++) request.files[i] = (String) objects[b.getInt()];
+                request.mounter = this;
+                Share.show(context, request);
                 break;
             }
             case 26: {

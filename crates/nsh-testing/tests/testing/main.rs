@@ -99,7 +99,7 @@ fn headless_preserves_environment_and_data_and_stops_on_process_exit() {
         .unwrap();
     let mut config = EngineConfig::new(bundle);
     config.environment.os = Os::MacOs;
-    config.data_dir = Some(root.clone());
+    config.support_dir = Some(root.clone());
     let started = Instant::now();
     let mut app = Headless::start(config).unwrap();
     let result = app.wait(Duration::from_secs(10));
@@ -589,4 +589,18 @@ fn forward_goes_forward_on_the_web_only() {
     let failed: Vec<_> = results.iter().filter(|r| r.failure.is_some()).collect();
     assert!(failed.is_empty(), "{failed:#?}");
     assert_eq!(results.len(), 1);
+}
+
+#[test]
+fn input_targets_report_document_values_and_do_not_edit_covering_fields() {
+    let run = TestRun {
+        ui_sets: vec![nsh_base::registry()],
+        compile: compiler(vec![nsh_base::registry()]),
+        ..test_run(None)
+    };
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testing/input-target");
+    let results = run_file(&run, &dir.join("App.test.tsx"), &mut |_| {}).unwrap();
+    assert_eq!(results.len(), 2);
+    let failed: Vec<_> = results.iter().filter(|r| r.failure.is_some()).collect();
+    assert!(failed.is_empty(), "{failed:#?}");
 }

@@ -77,7 +77,7 @@ fn start(name: &str) -> (Engine, Receiver<MountBatch>) {
         limits: nsh_engine::Limits::default(),
         ui_sets: Vec::new(),
         runtime: None,
-        data_dir: None,
+        support_dir: None,
         cache: nsh_engine::CacheOptions::off(),
         storage: None,
         clock: Default::default(),
@@ -90,6 +90,7 @@ fn start(name: &str) -> (Engine, Receiver<MountBatch>) {
         audio: None,
         windows: None,
         login_item: None,
+        data_dir: None,
     };
     (
         Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap(),
@@ -244,6 +245,9 @@ fn a_move_with_a_button_down_reaches_on_mouse_move_with_the_button() {
                     location: nsh_core::geometry::point(px(x as f32), px(2.0)),
                     changed: true,
                     pointer_type: nsh_core::PointerType::Mouse,
+                    pressure: 0.5,
+                    tilt_x: 0.0,
+                    tilt_y: 0.0,
                 }],
             })),
         );

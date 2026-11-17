@@ -526,6 +526,61 @@ struct ImageState {
     svg_current_color: bool,
 }
 
+/// A style most nodes leave at its default: stored only once set to
+/// something else, read through the shared default otherwise.
+#[derive(Default)]
+struct Sparse<T: 'static>(Option<Box<T>>);
+
+trait SharedDefault: Sized + PartialEq + 'static {
+    fn shared_default() -> &'static Self;
+}
+
+impl SharedDefault for ViewStyle {
+    fn shared_default() -> &'static Self {
+        &ViewStyle::DEFAULT
+    }
+}
+
+impl SharedDefault for TextStyle {
+    fn shared_default() -> &'static Self {
+        &TextStyle::DEFAULT
+    }
+}
+
+impl<T: SharedDefault> Sparse<T> {
+    fn set(&mut self, value: T) {
+        // A node restyled once keeps its box: only a node without one pays
+        // for the comparison with the default.
+        if let Some(b) = &mut self.0 {
+            **b = value;
+        } else if value != *T::shared_default() {
+            self.0 = Some(Box::new(value));
+        }
+    }
+}
+
+impl<T: SharedDefault> std::ops::Deref for Sparse<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        match &self.0 {
+            Some(b) => b,
+            None => T::shared_default(),
+        }
+    }
+}
+
+impl<T: SharedDefault + std::fmt::Debug> std::fmt::Debug for Sparse<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        (**self).fmt(f)
+    }
+}
+
+impl<T: SharedDefault> PartialEq<T> for Sparse<T> {
+    fn eq(&self, other: &T) -> bool {
+        **self == *other
+    }
+}
+
 struct Node {
     id: NodeId,
     kind: Kind,
@@ -540,8 +595,8 @@ struct Node {
     /// and views made overlays by `position: fixed`; for a span, which has
     /// no layout node, what a layout node takes when it is a block again.
     base_layout: Option<Box<taffy::Style>>,
-    view_style: ViewStyle,
-    text_style: TextStyle,
+    view_style: Sparse<ViewStyle>,
+    text_style: Sparse<TextStyle>,
     /// SVG's paint properties as written on the node (inherited by the
     /// canvases inside it); `None` while it sets none.
     paint: Option<Box<PaintStyle>>,
@@ -889,8 +944,8 @@ impl Node {
             children: Vec::new(),
             layout: None,
             base_layout: None,
-            view_style: ViewStyle::default(),
-            text_style: TextStyle::default(),
+            view_style: Sparse::default(),
+            text_style: Sparse::default(),
             paint: None,
             animated: Vec::new(),
             drawing: None,
@@ -984,6 +1039,9 @@ impl Node {
 struct TextContext<P> {
     text: Arc<AttributedText>,
     alignments: crate::AttachmentAlignments,
+    /// The UTF-16 offsets of the attachments of [`Self::text`] that are
+    /// the horizontal padding of a span ([`span_padding`]), not views.
+    spacers: Vec<u32>,
     /// `text.layout_hash()`, computed once per content.
     layout_hash: u64,
     /// Platform typesetting state, created on first use.
@@ -1048,6 +1106,7 @@ impl<P> TextContext<P> {
         Self {
             layout_hash: text.layout_hash(),
             alignments: Default::default(),
+            spacers: Vec::new(),
             text,
             prepared: None,
             same_lines: None,
@@ -1181,8 +1240,14 @@ pub struct Core<M: TextEngine> {
     /// Culled views were made in this round: their styles go out in
     /// another.
     cull_made: bool,
-    /// The walk of [`Core::sync_culled`], kept for its buffer.
-    cull_scratch: Vec<(Key, f32, f32)>,
+    /// The walk of [`Core::sync_culled`], kept for its buffer: each view
+    /// with where it is in the scroll view's content and how far the
+    /// transforms around it may move it (`cull.rs`).
+    cull_scratch: Vec<(Key, f32, f32, f32, f32)>,
+    /// How far the animation graph's values may go: how far an animated
+    /// transform may move a view culling looks at
+    /// (`animation/reach.rs`).
+    reach: crate::animation::Reach,
     /// Views out of sight spread over turns (`pace.rs`).
     pace: pace::Pace,
     /// Lists' rows under this turn's layout animation (`list_motion.rs`).
@@ -1232,8 +1297,6 @@ pub struct Core<M: TextEngine> {
     /// The warning about animated insets of views that are not sticky, or
     /// on the axis their scroll view does not scroll, was logged.
     inset_warned: bool,
-    /// The warning about padding on a span was logged.
-    span_padding_warned: bool,
     /// Compiled shaders by the hash of their source, with their errors
     /// (an app setting the same source again compiles it once).
     shaders: rustc_hash::FxHashMap<u64, Result<crate::shader::Shader, crate::shader::ShaderError>>,
@@ -1374,6 +1437,9 @@ pub struct Core<M: TextEngine> {
     /// whatever is typed meanwhile: only such a focus shows the hint of
     /// the anchor it comes to (`overlay::focus_hints`).
     focus_by_keyboard: bool,
+    /// A shown modal closed; focus reports restore context until the next
+    /// user action, rather than requesting another hint.
+    restoring_modal_focus: bool,
     /// The view in the `FOCUS_VISIBLE` state, by key and id
     /// (`classes::update_focus_visible`).
     focus_visible_on: Option<(Key, NodeId)>,
@@ -1542,6 +1608,7 @@ impl<M: TextEngine> Core<M> {
             culls_content: true,
             culling: Vec::new(),
             cull_dirty: false,
+            reach: crate::animation::Reach::default(),
             cull_made: false,
             cull_scratch: Vec::new(),
             pace: pace::Pace::default(),
@@ -1563,7 +1630,6 @@ impl<M: TextEngine> Core<M> {
             follow_changed: false,
             sticky_warned: false,
             inset_warned: false,
-            span_padding_warned: false,
             shaders: Default::default(),
             transition_starts: Vec::new(),
             pictured: Default::default(),
@@ -1615,6 +1681,7 @@ impl<M: TextEngine> Core<M> {
             modality: None,
             focus_visible: false,
             focus_by_keyboard: false,
+            restoring_modal_focus: false,
             focus_visible_on: None,
             focus_visible_moved: false,
             projected_focus: Vec::new(),
@@ -2018,6 +2085,54 @@ impl<M: TextEngine> Core<M> {
         // behind by the content (`Core::overlay_scrolled`).
         if moved && !self.overlays.is_empty() {
             self.overlay_scrolled(key);
+        }
+    }
+
+    /// The user moved scroll view `id` with scroll key move `key_move`, which
+    /// the platform animates to what it knows of the content. On a list of its
+    /// own End queues an animated `scrollToEnd`, in order with the app's
+    /// scroll commands, so the list follows its end and rows below that
+    /// were never rendered, sized by their estimate, do not stop it short;
+    /// a repeat while the list follows its end changes nothing. Any other
+    /// key takes back an End not resolved yet and ends the target the list
+    /// followed, as the user scrolling away does. Lists in their parent's
+    /// viewport and inverted lists are left to the platform.
+    pub fn key_scrolled(&mut self, id: NodeId, key_move: crate::scroll::KeyMove) {
+        let Ok(key) = self.key(id) else { return };
+        let queued = self.commands.iter().filter(|(to, _)| *to == id).count() as u32;
+        let Some(list) = self.nodes[key as usize].list.as_mut() else {
+            return;
+        };
+        if !list.follows_end_key() {
+            return;
+        }
+        if key_move == crate::scroll::KeyMove::End {
+            // A repeat: the last scroll queued or followed is the end.
+            let repeat = match list.key_ends.last() {
+                Some(&n) => n + 1 == queued,
+                None => queued == 0 && list.follows_end(),
+            };
+            if !repeat {
+                list.key_ends.push(queued);
+                self.commands
+                    .push((id, Command::ScrollToEnd { animated: true }));
+            }
+            return;
+        }
+        list.unpin();
+        let ends = std::mem::take(&mut list.key_ends);
+        // The latest first, so the places of the earlier ones hold.
+        for &n in ends.iter().rev() {
+            let at = self
+                .commands
+                .iter()
+                .enumerate()
+                .filter(|(_, (to, _))| *to == id)
+                .nth(n as usize)
+                .map(|(at, _)| at);
+            if let Some(at) = at {
+                self.commands.remove(at);
+            }
         }
     }
 
@@ -2546,6 +2661,11 @@ impl<M: TextEngine> Core<M> {
                 Ok(())
             }
             Op::Animation(op) => {
+                // A view culled for where its transform may take it may
+                // reach further now (`cull.rs`).
+                if self.reach.apply(&op) && !self.culling.is_empty() {
+                    self.cull_dirty = true;
+                }
                 self.mount.push(MountItem::Animation(op));
                 Ok(())
             }
@@ -4140,9 +4260,6 @@ impl<M: TextEngine> Core<M> {
         let rtl = self.resolved_rtl(key);
         crate::style::resolve_normal_alignment(&mut layout);
         crate::style::apply_direction(&mut layout, &mut view, &logical, rtl);
-        if self.nodes[key as usize].inline && padded_inline(&layout) {
-            self.warn_span_padding(key);
-        }
         // A sticky box's insets say where it sticks, not where it is laid
         // out.
         let sticky = pending.sticky_position.then(|| Box::new(layout.inset));
@@ -4275,8 +4392,8 @@ impl<M: TextEngine> Core<M> {
             node.vertical_align != vertical_align && node.inline && node.kind != Kind::Text;
         // ... and so is the content's of a render placed there.
         let content_align_changed = node.vertical_align != vertical_align && !node.inline;
-        node.view_style = view;
-        node.text_style = text;
+        node.view_style.set(view);
+        node.text_style.set(text);
         node.paint = paint;
         node.animated = animated;
         node.z_index = z_index;
@@ -4317,8 +4434,15 @@ impl<M: TextEngine> Core<M> {
                 self.needs_layout = true;
             }
         } else if node.kind == Kind::Text {
-            // A span: kept for when it is a block again.
+            // A span: kept for when it is a block again. Its padding is
+            // part of its block's text (horizontal: room in the line;
+            // vertical: its background's).
+            let padding = |l: &taffy::Style| l.padding;
+            let padded = node.base_layout.as_deref().map(padding) != Some(padding(&layout));
             node.base_layout = Some(Box::new(layout));
+            if padded && node.inline {
+                self.mark_text_block(key);
+            }
         }
         let mut flags = 0;
         if view_changed {
@@ -5367,12 +5491,18 @@ impl<M: TextEngine> Core<M> {
                 }
             }
             Prop::ScrollValue(value) => {
+                if let Some(value) = value {
+                    self.reach.drive(value);
+                }
                 if let Some(scroll) = node.scroll.as_mut() {
                     scroll.scroll_value = value;
                     flags |= dirty::SCROLL;
                 }
             }
             Prop::PullValue(value) => {
+                if let Some(value) = value {
+                    self.reach.drive(value);
+                }
                 if let Some(scroll) = node.scroll.as_mut() {
                     scroll.pull_value = value;
                     flags |= dirty::SCROLL;
@@ -5499,6 +5629,10 @@ impl<M: TextEngine> Core<M> {
                 }
             }
             Prop::PanValues(x, y) => {
+                // A gesture drives them: no bound on where they take a view.
+                for value in [x, y].into_iter().flatten() {
+                    self.reach.drive(value);
+                }
                 (node.gestures.pan_x, node.gestures.pan_y) = (x, y);
                 flags |= dirty::PAN;
             }
@@ -5516,10 +5650,16 @@ impl<M: TextEngine> Core<M> {
                 }
             }
             Prop::PinchValue(value) => {
+                if let Some(value) = value {
+                    self.reach.drive(value);
+                }
                 node.gestures.pinch = value;
                 flags |= dirty::PAN;
             }
             Prop::RotationValue(value) => {
+                if let Some(value) = value {
+                    self.reach.drive(value);
+                }
                 node.gestures.rotation = value;
                 flags |= dirty::PAN;
             }
@@ -5723,6 +5863,10 @@ impl<M: TextEngine> Core<M> {
             }
             Prop::ProjectedData(data) => {
                 self.set_projected_data(key, data);
+                return Ok(());
+            }
+            Prop::ProjectedActive(group) => {
+                self.set_projected_active(key, group);
                 return Ok(());
             }
             Prop::HeaderStyle(patch) => {
@@ -6470,6 +6614,9 @@ impl<M: TextEngine> Core<M> {
     /// Unlinks `key` from its parent's children, layout and (optionally)
     /// native hierarchy.
     fn unlink(&mut self, key: Key, emit_remove: bool) {
+        if self.nodes[key as usize].kind == Kind::Modal && self.nodes[key as usize].created {
+            self.restoring_modal_focus = true;
+        }
         let parent = self.nodes[key as usize].parent;
         let siblings = &mut self.nodes[parent as usize].children;
         let pos = siblings
@@ -6879,22 +7026,6 @@ impl<M: TextEngine> Core<M> {
             .count() as u32
     }
 
-    /// Warns once of horizontal padding on a span (`key`): its characters
-    /// flow in its block's lines, so it has no box to pad (#1902); space
-    /// characters at its ends pad it instead.
-    fn warn_span_padding(&mut self, key: Key) {
-        let node = &self.nodes[key as usize];
-        if self.span_padding_warned || node.kind != Kind::Text {
-            return;
-        }
-        self.span_padding_warned = true;
-        log::warn!(
-            target: "js",
-            "padding on a nested <Text> is ignored (view {}): its characters flow in the text's lines; put spaces (U+202F, U+2009) at its ends to pad its background",
-            node.id
-        );
-    }
-
     /// Moves `key` (and its subtree) into or out of an inline context.
     fn set_inline(&mut self, key: Key, inline: bool) {
         let node = &mut self.nodes[key as usize];
@@ -6909,20 +7040,15 @@ impl<M: TextEngine> Core<M> {
         if inline {
             // Block -> span: spans have no layout node or native view; the
             // span keeps the style for when it is a block again.
-            let mut padded = false;
             if let Some(l) = node.layout.take() {
                 if node.base_layout.is_none() {
                     node.base_layout = Some(Box::new(self.layout.style(l).clone()));
                 }
-                padded = node.base_layout.as_deref().is_some_and(padded_inline);
                 self.layout.remove(l);
             }
             if node.created {
                 node.created = false;
                 self.mount.push(MountItem::Delete { id: node.id });
-            }
-            if padded {
-                self.warn_span_padding(key);
             }
         } else {
             // A fixed text keeps its style: the layout node takes it with
@@ -6959,6 +7085,17 @@ impl<M: TextEngine> Core<M> {
         self.tab_places_stale = true;
         if node.kind == Kind::Text {
             self.measure_for_real(key);
+        }
+        // A follower made after layout (it waited, culled or paced) took the
+        // frame layout gave it, and no walk of `emit_frames_in` told
+        // `laid_follower` of it, so `place_follower` has nothing to place:
+        // lay it out again, which does.
+        if culled_frame.is_some()
+            && self.nodes[key as usize].follow.is_some()
+            && let Some(layout) = self.nodes[key as usize].layout
+        {
+            self.layout.mark_dirty(layout);
+            self.needs_layout = true;
         }
         let node = &mut self.nodes[key as usize];
         if let Some(scroll) = node.scroll.as_mut() {
@@ -7103,6 +7240,9 @@ impl<M: TextEngine> Core<M> {
             && !parent_list
         {
             flags |= dirty::SCROLL;
+            if scroll.behavior != ScrollBehavior::default() {
+                flags |= dirty::SCROLL_BEHAVIOR;
+            }
             if scroll.refreshing {
                 flags |= dirty::REFRESHING;
             }
@@ -7169,8 +7309,13 @@ impl<M: TextEngine> Core<M> {
         let node = &mut self.nodes[key as usize];
         node.dirty |= flags;
         // A culled view given a transform or an animated value may show
-        // away from its frame now (`cull.rs`).
-        if node.culled && flags & (dirty::VIEW | dirty::ANIMATION) != 0 {
+        // away from its frame now, and so may what a view with one holds
+        // (`cull.rs`).
+        if flags & (dirty::VIEW | dirty::ANIMATION) != 0
+            && (node.culled
+                || !self.culling.is_empty()
+                    && (!node.animated.is_empty() || !node.view_style.transform.ops().is_empty()))
+        {
             self.cull_dirty = true;
         }
         if !node.queued {
@@ -7730,8 +7875,19 @@ impl<M: TextEngine> Core<M> {
         let base = inherited.inherit(&node.text_style);
         let multiplier = node.paragraph.font_multiplier(self.font_scale);
         let inserted = self.update_attachments(key);
-        let mut alignments = crate::AttachmentAlignments::default();
-        self.collect_text(key, base, &mut text, &mut alignments, false);
+        let baselines = self.attachment_baselines(key);
+        let mut parts = TextAttachments {
+            alignments: crate::AttachmentAlignments::default(),
+            spacers: Vec::new(),
+            baselines: &baselines,
+            next_baseline: 0,
+        };
+        self.collect_text(key, base, &mut text, &mut parts, false);
+        let TextAttachments {
+            alignments,
+            spacers,
+            ..
+        } = parts;
         self.hide_attachments(key, false);
         if multiplier != 1.0 {
             for span in &mut text.spans {
@@ -7744,6 +7900,7 @@ impl<M: TextEngine> Core<M> {
         let colors_at_draw = self.text_engine.draws_colors_from_text();
         let cx = self.text_cx(layout);
         cx.deferred = deferred;
+        cx.spacers = spacers;
         if *cx.text == text && cx.alignments == alignments {
             if inserted {
                 // New attachment views: placed with the next final layout.
@@ -7815,14 +7972,14 @@ impl<M: TextEngine> Core<M> {
         true
     }
 
-    /// The text of `key`'s children into `out`; `in_press`: inside a span
-    /// taking presses.
+    /// The text of `key`'s children into `out`, what it learns of their
+    /// attachments into `parts`; `in_press`: inside a span taking presses.
     fn collect_text(
         &self,
         key: Key,
         style: ResolvedTextStyle,
         out: &mut AttributedText,
-        alignments: &mut crate::AttachmentAlignments,
+        parts: &mut TextAttachments<'_>,
         in_press: bool,
     ) {
         for &c in &self.nodes[key as usize].children {
@@ -7835,7 +7992,8 @@ impl<M: TextEngine> Core<M> {
                 Kind::Text => {
                     let start = out.len_utf16();
                     let mut inner = style.inherit(&child.text_style);
-                    if let Some(b) = span_background(&child.view_style, child.id) {
+                    if let Some(mut b) = span_background(&child.view_style, child.id) {
+                        (b.top, b.bottom) = span_vertical_padding(child);
                         inner.background = Some(b);
                     }
                     // `visibility: "hidden"` on a span hides its characters,
@@ -7849,7 +8007,19 @@ impl<M: TextEngine> Core<M> {
                     // updated after this merge in the same commit.
                     let tracked = child.classes.as_ref().map_or(0, |c| c.tracked_states());
                     let hovers = tracked & crate::tailwind::state::HOVERED != 0;
-                    self.collect_text(c, inner, out, alignments, in_press || press);
+                    // Horizontal padding takes room in the line, as a CSS
+                    // inline box's does: an empty attachment at each end in
+                    // the span's style, so its background spans it too.
+                    let (first, last) = span_padding(child, out.rtl);
+                    let pad = |out: &mut AttributedText, spacers: &mut Vec<u32>, w: f32| {
+                        if w > 0.0 {
+                            spacers.push(out.len_utf16());
+                            out.push_attachment(crate::geometry::size_pt(w, 0.0), inner);
+                        }
+                    };
+                    pad(out, &mut parts.spacers, first);
+                    self.collect_text(c, inner, out, parts, in_press || press);
+                    pad(out, &mut parts.spacers, last);
                     // A link with a hint (its URL) hears the pointer come
                     // over its characters and leave them. A span that takes
                     // no presses (a `RichEditor`'s link mark: the editor's
@@ -7895,7 +8065,19 @@ impl<M: TextEngine> Core<M> {
                 _ => {
                     if let Some(l) = child.layout {
                         let size = self.rounded_layout(l).size;
-                        alignments.push(
+                        // The baselines are in the attachments' order: the
+                        // next one is this attachment's, or a later one's.
+                        if let Some(&(_, baseline)) = parts
+                            .baselines
+                            .get(parts.next_baseline)
+                            .filter(|b| b.0 == c)
+                        {
+                            parts.next_baseline += 1;
+                            parts
+                                .alignments
+                                .set_baseline(out.len_utf16(), Some(baseline));
+                        }
+                        parts.alignments.push(
                             out,
                             crate::geometry::size_pt(size.width, size.height),
                             self.attachment_align(c),
@@ -7920,8 +8102,15 @@ impl<M: TextEngine> Core<M> {
         {
             return node.vertical_align;
         }
-        // The placeholder's only child is the holder; the holder's, the
-        // content.
+        self.render_content(key)
+            .map_or(VerticalAlign::Baseline, |content| {
+                self.nodes[content as usize].vertical_align
+            })
+    }
+
+    /// The content of render placeholder `key`: the placeholder's only
+    /// child is the holder; the holder's, the content.
+    fn render_content(&self, key: Key) -> Option<Key> {
         let mut key = key;
         for _ in 0..2 {
             let mut children = self.nodes[key as usize]
@@ -7930,10 +8119,64 @@ impl<M: TextEngine> Core<M> {
                 .filter(|&&c| !self.nodes[c as usize].is_overlay());
             match (children.next(), children.next()) {
                 (Some(&only), None) => key = only,
-                _ => return VerticalAlign::Baseline,
+                _ => return None,
             }
         }
-        self.nodes[key as usize].vertical_align
+        Some(key)
+    }
+
+    /// The attachments of text block `key` that stand on the baseline by
+    /// a baseline of their own, with how far below their top it is: the
+    /// first line's of the first text in each, laid out by
+    /// [`Core::update_attachments`], as CSS stands an `inline-block` or
+    /// `inline-flex` box on the baseline of its first line box. One with
+    /// no text in it (an image, a box), or whose engine knows no
+    /// baselines, stands on its bottom edge, as a replaced box.
+    fn attachment_baselines(&mut self, key: Key) -> Vec<(Key, Points)> {
+        let mut keys = Vec::new();
+        self.attachments_of(key, &mut keys);
+        keys.retain(|&a| self.attachment_align(a) == crate::style::VerticalAlign::Baseline);
+        keys.into_iter()
+            .filter_map(|a| Some((a, self.first_text_baseline(a, true)?)))
+            .collect()
+    }
+
+    /// How far below `key`'s top the baseline of the first line of text
+    /// in it is (`root`: `key` is the box asked about, else its place in
+    /// its parent counts too); none without a text.
+    fn first_text_baseline(&mut self, key: Key, root: bool) -> Option<Points> {
+        let node = &self.nodes[key as usize];
+        if node.is_overlay() {
+            return None;
+        }
+        let layout = node.layout?;
+        // Only what takes part in the box's flow has its baseline: not a
+        // `display: none` subtree, which has no box (CSS Display), nor an
+        // absolutely positioned one, out of the flow.
+        if !root
+            && (self.layout.displays_none(layout)
+                || self.layout.style(layout).position == Position::Absolute)
+        {
+            return None;
+        }
+        let text = node.kind == Kind::Text;
+        let l = *self.layout.unrounded_layout(layout);
+        let top = if root { 0.0 } else { l.location.y };
+        if text {
+            let width =
+                l.size.width - l.padding.left - l.padding.right - l.border.left - l.border.right;
+            let engine = &self.text_engine;
+            let Some(LeafContext::Text(cx)) = self.layout.get_node_context_mut(layout) else {
+                return None;
+            };
+            let baseline = text_baseline(engine, cx, width.max(0.0))?;
+            return Some(Points(top + l.border.top + l.padding.top) + baseline);
+        }
+        let children = self.nodes[key as usize].children.clone();
+        children
+            .into_iter()
+            .find_map(|c| self.first_text_baseline(c, false))
+            .map(|inner| Points(top) + inner)
     }
 
     /// The render placeholder in a text that view `key` is the content of
@@ -8993,7 +9236,15 @@ impl<M: TextEngine> Core<M> {
     /// placeholders in `layout` (content box `content`); cut off ones out
     /// of sight.
     fn place_attachments(&mut self, key: Key, layout: &TextLayout, content: Bounds<Points>) {
-        let points = self.text_engine.attachments(layout);
+        let mut points = self.text_engine.attachments(layout);
+        if let Some(l) = self.nodes[key as usize].layout {
+            // Padding of spans is no view's.
+            let cx = self.text_cx(l);
+            if !cx.spacers.is_empty() {
+                let mut indices = cx.text.attachments.iter().map(|a| a.index);
+                points.retain(|_| indices.next().is_none_or(|i| !cx.spacers.contains(&i)));
+            }
+        }
         let attached = std::mem::take(&mut self.nodes[key as usize].attached);
         for (i, &id) in attached.iter().enumerate() {
             let Ok(a) = self.key(id) else { continue };
@@ -9615,6 +9866,9 @@ impl<M: TextEngine> Core<M> {
             Follow::To(offset) => retarget = Some(offset),
         }
 
+        // The End key's commands, if any, are resolved below with the
+        // rest (`Core::key_scrolled`).
+        list.key_ends.clear();
         // Scroll commands for the list, now that sizes are known: the
         // window follows a jump in this same commit. In its parent's
         // viewport, the view around it scrolls instead.
@@ -10879,10 +11133,33 @@ fn disabling_changes(events: EventMask) -> bool {
     DISABLED_OFF.iter().any(|&e| events.contains(e))
 }
 
-/// Whether `layout` pads its left or right side (a span cannot).
-fn padded_inline(layout: &taffy::Style) -> bool {
-    let zero = taffy::LengthPercentage::length(0.0);
-    layout.padding.left != zero || layout.padding.right != zero
+/// A span's horizontal padding at its first and last character, in
+/// points (its block is right to left when `rtl`). Percentages, of no box
+/// a span has, count as none.
+fn span_padding(node: &Node, rtl: bool) -> (f32, f32) {
+    let Some(style) = node.base_layout.as_deref() else {
+        return (0.0, 0.0);
+    };
+    let len = |p: taffy::LengthPercentage| match p.into_raw().tag() {
+        taffy::CompactLength::LENGTH_TAG => p.into_raw().value().max(0.0),
+        _ => 0.0,
+    };
+    let (left, right) = (len(style.padding.left), len(style.padding.right));
+    if rtl { (right, left) } else { (left, right) }
+}
+
+/// A span's top and bottom padding, which only its background takes (as
+/// a CSS inline box's): the line keeps its height. Percentages count as
+/// none.
+fn span_vertical_padding(node: &Node) -> (Points, Points) {
+    let Some(style) = node.base_layout.as_deref() else {
+        return (Points::ZERO, Points::ZERO);
+    };
+    let len = |p: taffy::LengthPercentage| match p.into_raw().tag() {
+        taffy::CompactLength::LENGTH_TAG => Points(p.into_raw().value().max(0.0)),
+        _ => Points::ZERO,
+    };
+    (len(style.padding.top), len(style.padding.bottom))
 }
 
 /// The background a nested text's view style gives its characters.
@@ -10891,6 +11168,8 @@ fn span_background(style: &ViewStyle, node: NodeId) -> Option<crate::text::TextB
         color: style.background_color,
         radius: style.border_radius.max(Points::ZERO),
         node,
+        top: Points::ZERO,
+        bottom: Points::ZERO,
     })
 }
 
@@ -11016,6 +11295,7 @@ fn shown_by(item: &MountItem) -> Shown {
                 | C::PickFiles { .. }
                 | C::OpenUrl { .. }
                 | C::PickScreenColor { .. }
+                | C::Share { .. }
                 | C::RenderCanvas { .. }
                 | C::FileRequest { .. }
                 | C::Speech { .. }
@@ -11031,4 +11311,19 @@ fn shown_by(item: &MountItem) -> Shown {
         }
         item => item.view().map_or(Shown::Everywhere, Shown::View),
     }
+}
+
+/// What collecting a text block's text gathers about its attachments, and
+/// what it places them by.
+struct TextAttachments<'a> {
+    /// Where each sits in its line.
+    alignments: crate::AttachmentAlignments,
+    /// The empty attachments standing for spans' horizontal padding.
+    spacers: Vec<u32>,
+    /// The baselines of their own the views holding text stand by
+    /// ([`Core::attachment_baselines`]).
+    baselines: &'a [(Key, Points)],
+    /// The first of `baselines` not met yet: they are in the attachments'
+    /// order ([`Core::attachments_of`]).
+    next_baseline: usize,
 }

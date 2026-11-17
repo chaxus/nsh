@@ -187,16 +187,24 @@ build to the same file) and takes `nsh.js` from the crate.
   `host:*`), as the browser follows redirects before NSH could check them. Relative URLs resolve against the page
   (`document.baseURI`, `nsh_set_base_url`) as it starts: the page's script resolves its `app` URLs (and the head's
   requests are keyed the same way), the `Player` its `assets`, `data` and `assetBase` and the app's relative
-  `asset()` URLs against `player.baseURL`, and `browser/runtime.js` the entry, the chunks and the app realm's
-  `<base>`, so nothing loads from the directory a `history.pushState` moved the address to. `nsh.json` `web.base`
+  `asset()` URLs against `player.baseURL` (`createPlayer`'s `baseURL`, the site's base, else `document.baseURI`),
+  links, web views' URLs and addresses against `player.addressBase()`, and `browser/runtime.js` the entry, the chunks and the realm's
+  `import.meta.url`, so nothing
+  loads from the directory a `history.pushState` moved the address to. `nsh.json` `web.base`
   (`web::page_base`: a path from the root
   in the form browsers send it, unreserved characters and percent-escapes without dot or empty segments, a `/`
-  added at its end, which `start_at` matches requests against as it is) puts a `<base href>` first in the head, so the page loads its files at any of the app's paths
-  (`/sports/football`), which `SiteServer::start_at` (`--run`) serves under it; the dev page has `<base href="/">`
+  added at its end, which `start_at` matches requests against as it is) prefixes every file's URL (`Site::url`) and
+  is the app's `base` (the player's `baseURL`); the page has no `<base href>`, which a strict `base-uri` refuses, and
+  loads its files at any of the app's paths (`/sports/football`), which `SiteServer::start_at` (`--run`) serves
+  under it; the dev page has `<base href="/">`
   (the dev server serves its files at the root). `nsh.json` `web.history` reaches `createPlayer`'s `history` on
   both pages (the packaged page's `app.history`, the dev page's `HISTORY`, which `with_page_host` fills in); without
   it the player's default (`window.top === window`) holds. The app ships as minified ES modules
-  (`app.<digest>.js` and `<chunk>.<digest>.js`). An import map resolves original chunk URLs to hashed files;
+  (`app.<digest>.js` and `<chunk>.<digest>.js`), linked to one another and to the native modules' facade files
+  (`web::publish_modules`), so the realm needs no import map (an inline script) unless the app imports a native
+  module whole; the page's styles are a file and the runtime's are constructed sheets, for a strict `style-src`;
+  the runtime's own images (`image_bytes`, `svgInColor`, `Clipboard.readImage`) are `blob:` / `data:` URLs, so the
+  policy `nsh package` prints adds `img-src 'self' blob: data:`;
   transitive entry fonts load before startup and dynamic imports prepare the requested chunk's font dependencies.
   The browser loads static dependencies, module cycles and dynamic chunks itself. No bytecode or hardening
   bytecode ships in a browser package. An app with a Rust crate of
@@ -673,7 +681,9 @@ follows itself to check each one against restricted capabilities (`access.rs`).
 
 Relative request URLs (`fetch("/api")`, `new Request("x")`) resolve against the page's `document.baseURI` as the
 player started (`player.baseURL`), which `nsh.js` hands over once with `nsh_set_base_url`. The app's `fetch`, the
-browser's own run in the app realm, resolves them against that realm's `<base>`, which is `player.baseURL` too; a
+browser's own run in the app realm, resolves them against `player.baseURL` too: the realm's `<base>`, or where the
+page names the site's base (`baseURL`, a published app's page, which has no `<base>` for a strict `base-uri` to
+refuse) the realm's `fetch` itself (`installFetch`'s `base`); a
 `fetch` in the page's own realm (the host module's) resolves against the page's address when it runs.
 Native hosts have no base and keep rejecting relative URLs. `new URL("/x")` without a base throws,
 as in browsers. Relative `<Image>` URLs resolve against `player.baseURL` too (`asset()`), so they load after the
@@ -704,6 +714,9 @@ browsers' touches into what phones report:
   the page neither scrolls, zooms nor refreshes under the app and presses and pans get no `pointercancel`. Touch
   scrolling is the browser's: a `pointercancel` in a scroll view starts its drag, `touchend` ends it, a scroll within
   150 ms after it begins the glide, `scrollend` ends it (`touchScroll`, `scrolled`, `scrollEnded`).
+  A touch responder that blocks native scrolling (`setResponder`: a `TouchClaim` with `block_native`, JS's
+  `onResponderGrant` returning true) keeps its touches: a non-passive `touchmove` on the root prevents the browser's
+  scroll while it holds them (`responderBlocks`), unless the browser already scrolls (`cancelable` false).
 - **Wheels and touchpads** (`wheel`) go to the innermost scroll view along their axis that can move that way (a
   vertical wheel scrolls a horizontal view when no vertical one can) and stay on it while events come within 200 ms;
   notches glide, touchpads follow the fingers; snapping views move one snap point per scroll. Nothing to scroll: the
@@ -838,7 +851,7 @@ browsers' touches into what phones report:
   address; where the app is the page `set_app_url` resolves a URL against the page's base (the root `onUrlScheme`
   event's `base`, kept in the cell) and refuses another origin (`resolve_on_page`, and the core again), as `browser/address.js` does for TS (which checks
   the raw string as `check_address` does before resolving, in the app's realm). `setUrl` / `set_app_url` reach the
-  root as `Command::SetAppUrl` on the web, and `setPageUrl` keeps the URL in `pageUrl` when the app is the page.
+  root as `Command::SetAppUrl` (the core sends it to every platform: iOS and macOS hand it off, `embedding.md`), and `setPageUrl` keeps the URL in `pageUrl` when the app is the page.
   `syncHistory` applies it last, with `history.replaceState(history.state, "", url)`, after pushing the entries of
   the turn's pages, so the address lands on the new top entry; while a `history.go` of its own is in flight
   (`ignoredPops`) it waits, and when the last ignored `popstate` lands the waiting address goes to the entry, or the
@@ -880,7 +893,7 @@ browsers' touches into what phones report:
   drops its own) when the turn pushed no page's entry (else the address goes on the new top entry, as a replace) and
   it is not the landed entry's address; a turn that popped pages pushes it once its `history.go` lands. A new run
   drops a push waiting (`resetHistory`). `browser/address.js` hands the options to the core as they are; the core
-  reads them (`SetUrlOptions`), and a `history` of another value is a `TypeError`. The other platforms keep the URL.
+  reads them (`SetUrlOptions`), and a `history` of another value is a `TypeError`. The other platforms keep the URL; iOS and macOS also hand it off when the app opts in.
 - **Text selection**: text is selectable when `selectable` is true (`userSelect: "text"`; `nsh-selectable`), and with the desktop idiom also
   when it is unset (`null` in the `t` item: `nsh-autoselect`, selectable under `.nsh-desktop`) unless a view around it,
   or the text itself, takes presses, touches, pans or pinches (`nsh-press`, set in `updateTouchAction`), as on a web

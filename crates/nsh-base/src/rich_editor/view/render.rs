@@ -122,7 +122,12 @@ pub(crate) fn render(rv: Rv) -> impl IntoElement {
                         scroll_rv.scrolled.set(e.offset.y);
                         scroll_rv.viewport.set(e.size);
                     })
-                    .on_layout(move |b: &Bounds<Points>| layout_rv.viewport.set(b.size))
+                    .on_layout(move |b: &Bounds<Points>| {
+                        layout_rv.viewport.set(b.size);
+                        // The viewport moving moves the content on the page
+                        // with no layout of the content's own.
+                        layout_rv.place();
+                    })
                     .child(content(rv.clone())),
             )
             .child(sink(rv)),
@@ -222,7 +227,26 @@ fn content(rv: Rv) -> impl IntoElement {
         true => end.release(),
         false => end.end_sweep(),
     })
-    .child(blocks(rv.clone(), DOC))
+    // Keep the intrinsic extent separate from the content box, whose
+    // min-height fills the viewport. In particular, a parent must be able
+    // to shrink an overestimated height and discover offscreen blocks
+    // without progressively enlarging the editor.
+    .child(
+        view()
+            .flex_shrink_0()
+            .on_layout({
+                let extent = rv.clone();
+                move |bounds: &Bounds<Points>| {
+                    // Root blocks are now relative to this wrapper, including
+                    // padding on Part::Content, rather than directly to content.
+                    extent.set_inset(DOC, bounds.origin);
+                    if extent.document_size.get_untracked() != bounds.size {
+                        extent.document_size.set(bounds.size);
+                    }
+                }
+            })
+            .child(blocks(rv.clone(), DOC)),
+    )
     .child(table::controls(rv.clone()))
     .child(gap_cursor(rv.clone()))
     .child(drop_cursor(rv.clone()))
@@ -1222,7 +1246,7 @@ fn link_destination(marks: &[Mark]) -> Option<(SharedString, Option<SharedString
 /// point.
 fn inline_box(rv: &Rv, el: View, (id, offset): (u64, usize)) -> View {
     let width_rv = rv.clone();
-    el.on_layout(move |b: &Bounds<Points>| width_rv.set_inline_width(id, offset, b.size.width))
+    el.on_layout(move |b: &Bounds<Points>| width_rv.set_inline_width(id, offset, *b))
 }
 
 /// An inline leaf: its one-character text (a line break), its node view,
@@ -1678,15 +1702,15 @@ impl Rv {
 
     /// The width of the inline view or image at `offset` in textblock
     /// `id`'s content (see `TextGeo::widths`).
-    fn set_inline_width(&self, id: u64, offset: usize, width: Points) {
+    fn set_inline_width(&self, id: u64, offset: usize, frame: Bounds<Points>) {
         let mut geo = self.geo.borrow_mut();
         let Some(text) = geo.texts.get_mut(&id) else {
             return;
         };
-        if text.widths.get(&offset) == Some(&width) {
+        if text.widths.get(&offset) == Some(&frame) {
             return;
         }
-        text.widths.insert(offset, width);
+        text.widths.insert(offset, frame);
         drop(geo);
         // Every inline view of a block reports its width as an edit before
         // them moves them (their offsets are new): the geometry follows once

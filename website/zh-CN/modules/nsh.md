@@ -6,7 +6,7 @@ order: 2
 
 # nsh
 
-`nsh` 是核心模块：响应式 API（signal、computed、effect、context）、`mount`、`token`、`setTheme`、宿主元素 `View`、`Text`、`Scroll` 和 `Overlay`，[可选择的视图](#selectable-views)、[安全区域与键盘](#safe-area-and-keyboard)，[动画](#animation)、[设备与环境](#device)、[`PanResponder`](#panresponder)、[剪贴板](#clipboard)、[照片选择器](#picker)、[语音识别](#speech)、[声音](#sound)、[存储](#storage)、[宿主通道](#host)、[键盘快捷键](#keymap)、[原生组件与模块](#nativecomponent-and-nativemodule)、[无障碍](#accessibility)，以及元素、样式和事件的 TypeScript 类型。响应式图本身以 Rust 原生运行；读取一个 signal 是一次对运行时的调用，只需几纳秒，只有你自己写的闭包会在 JavaScript 解释器中执行。
+`nsh` 是核心模块：响应式 API（signal、computed、effect、context）、`mount`、`token`、`setTheme`、宿主元素 `View`、`Text`、`Scroll` 和 `Overlay`，[可选择的视图](#selectable-views)、[安全区域与键盘](#safe-area-and-keyboard)，[动画](#animation)、[设备与环境](#device)、[`PanResponder`](#panresponder)、[剪贴板](#clipboard)、[照片选择器](#picker)、[分享面板](#share)、[语音识别](#speech)、[声音](#sound)、[存储](#storage)、[宿主通道](#host)、[键盘快捷键](#keymap)、[原生组件与模块](#nativecomponent-and-nativemodule)、[无障碍](#accessibility)，以及元素、样式和事件的 TypeScript 类型。响应式图本身以 Rust 原生运行；读取一个 signal 是一次对运行时的调用，只需几纳秒，只有你自己写的闭包会在 JavaScript 解释器中执行。
 
 ```ts
 import { batch, cleanup, computed, context, effect, ErrorBoundary, mount, Overlay, Scroll, signal, split, Text, token, untracked, View } from "nsh";
@@ -619,6 +619,7 @@ interface MotionOptions extends MotionPlayOptions {
 }
 
 interface MotionPlayOptions extends KeyframeTiming {
+  spring?: MotionSpring;             // 用这个弹簧播放每个通道
   ignoreReduceMotion?: boolean;      // 即使用户要求减少动态效果也照常播放
 }
 
@@ -675,8 +676,10 @@ type MotionChannel = "opacity" | "translateX" | "translateY" | "rotate" | "rotat
 
 interface MotionSpec extends KeyframeTiming {
   keyframes: { [C in MotionChannel]?: KeyframeValue[] } | MotionFrame[];
+  spring?: MotionSpring;
   ignoreReduceMotion?: boolean;
 }
+type MotionSpring = { stiffness?: number; damping?: number; mass?: number };   // 170、26、1
 type MotionFrame = { [C in MotionChannel]?: number | string } & { offset?: number; easing?: Easing };
 
 interface MotionPreset extends MotionSpec {
@@ -687,6 +690,22 @@ interface MotionPreset extends MotionSpec {
 现成的动效，以数据形式提供：`motion.play("shake")` 播放的就是 `motions.shake`。`MotionName` 是以下之一：`fadeIn`、`fadeInUp`、`fadeInDown`、`fadeInLeft`、`fadeInRight`、`zoomIn`、`popIn`、`bounceIn`、`slideInUp`、`slideInDown`、`flipInX`、`flipInY`（入场）；`fadeOut`、`fadeOutUp`、`fadeOutDown`、`fadeOutLeft`、`fadeOutRight`、`zoomOut`、`popOut`、`slideOutDown`、`slideOutUp`（退场）；`shake`、`headShake`、`wiggle`、`swing`、`pulse`、`heartbeat`、`rubberBand`、`jello`、`tada`、`jump`、`flash`（吸引注意）；`spin`、`float`、`breathe`、`sway`、`bob`、`glow`（循环）。[动画](../docs/animation.md#预设)逐一介绍了它们。展开一个预设即可修改它：`motion.play({ ...motions.fadeInUp, duration: 600 })`。
 
 `MotionSpec` 是你自己的动效：按通道写的关键帧（`{ opacity: [0, 1], translateY: [24, 0] }`），或像 Web Animations API 那样写的一组帧（`[{ opacity: 0, translateY: 24 }, { opacity: 1, translateY: 0 }]`，没有 offset 的帧按它在列表中的位置排布），再加上[关键帧的时间参数](#关键帧)。Rust：`MotionSpec::new(KeyframeTiming)` 配合 `.values(channel, values)`（均匀分布）、`.track(channel, keyframes)` 和 `.timing(|t| …)`；`MotionPreset::FadeInUp`（或 `.spec()`）是一个预设，`MotionChannel` 命名各通道。
+
+设置 `spring` 后，每个通道从当前所在的位置以弹簧运动到它的关键帧终点，而不是逐帧经过各关键帧：打断另一个动效时，会从那个动效留下的值和速度继续，而关键帧动效会从第一帧重新开始。第一个关键帧仍是 `enter` 让视图起步的位置；`delay` 在弹簧开始前等待，`direction: "reverse"` 让弹簧运动到第一个关键帧，中间的关键帧以及 `duration`、`easing`、`iterations` 不参与。刚度、阻尼和质量与 `Animated.spring` 的相同（默认 170、26、1）。Rust：在 `MotionSpec` 上调用 `.spring(Spring { stiffness, damping, ..Spring::default() })`。用户要求减少动态效果时，弹簧动效和其他动效一样立即落在终点。
+
+```rust tabs
+let spring = Spring { stiffness: 620.0, damping: 36.0, ..Spring::default() };
+let sheet = motion().entering(MotionPreset::SlideInUp.spec().spring(spring));
+// 还在上升时就被收起：从当前位置掉头，保留原有的速度。
+let _ = sheet.play(MotionPreset::SlideOutDown.spec().spring(spring));
+```
+
+```tsx tabs
+const spring = { stiffness: 620, damping: 36 };
+const sheet = createMotion({ enter: "slideInUp", spring });
+// 还在上升时就被收起：从当前位置掉头，保留原有的速度。
+sheet.play("slideOutDown", { spring });
+```
 
 ```rust tabs
 let rise = MotionSpec::new(KeyframeTiming::new(400.0))
@@ -862,11 +881,15 @@ interface LayoutAnimationConfig {
 }
 
 interface LayoutAnimationAnimation {
-  type?: "easeInEaseOut" | "spring" | "linear" | "easeIn" | "easeOut" | "keyboard";
+  type?: "easeInEaseOut" | "spring" | "linear" | "easeIn" | "easeOut" | "keyboard" | "bezier";
   property?: "opacity" | "scaleXY" | "scale";
   duration?: number;
   delay?: number;
-  springDamping?: number;          // 0..1，默认 0.7
+  springDamping?: number;          // 0..1，默认 0.7：按 `duration` 拟合的弹簧
+  stiffness?: number;              // 物理弹簧（默认 170）：持续到停稳为止
+  damping?: number;                // 阻尼系数（默认 26）
+  mass?: number;                   // 质量（默认 1）
+  bezier?: [number, number, number, number];
 }
 ```
 
@@ -2020,6 +2043,169 @@ for (const { file, name } of picked) {
 > 并以一个 `Error` reject，其 `code` 为 `"ERR_ACCESS_DENIED"`，`permission` 为 `"picker"`，`resource` 为 `""`。在 Rust
 > 中，`pick_images` 和 `pick_files` 回答没有文件，拒绝会记录在日志中。见[沙箱与能力](../docs/sandbox-and-capabilities.md)。
 
+## Share
+
+分享 API 把文本、链接或本地文件交给系统的分享面板，由用户继续发送：发给另一个应用、消息、邮件、AirDrop 或存成文件。
+iOS 上是 `UIActivityViewController`，Android 上是 `Intent.ACTION_SEND` 的选择器，macOS 上是分享菜单
+（`NSSharingServicePicker`），浏览器里是 `navigator.share`。Rust 代码调用 `nsh_core::prelude` 的 `share`；TSX 从 `nsh`
+导入 `Share`。
+
+```rust tabs
+use nsh_core::share::{ShareAction, ShareRequest};
+use nsh_core::prelude::*; // share, share_available
+```
+
+```tsx tabs
+import { Share, type ShareResult } from "nsh";
+```
+
+```ts
+const Share: {
+  available(): Promise<boolean>;
+  show(content: ShareContent): Promise<ShareResult>;
+};
+
+interface ShareContent {
+  title?: string; // 主题（邮件的主题行），面板有标题时也是它的标题
+  text?: string;
+  url?: string; // 链接：http(s)、mailto、应用自己的 scheme
+  files?: string[]; // 本地文件的绝对路径（最多 100 个）
+  anchor?: ViewRef; // 面板是 popover 时（iPad、macOS）指向的视图
+}
+
+interface ShareResult {
+  action: "shared" | "dismissed";
+  target: string | null; // 用户分享到了哪里，用平台给的名字
+}
+```
+
+| TS | Rust |
+|---|---|
+| `await Share.available()` | `share_available().await -> bool` |
+| `await Share.show(content)` | `share(request).await -> Result<ShareOutcome, ShareError>` |
+| `title`、`text`、`url`、`files` | `ShareRequest::new().title(..).text(..).url(..).file(..)` |
+| `anchor` | `.anchor(&element_ref)` |
+| `result.action`、`.target` | `outcome.action`（`ShareAction`）、`outcome.target` |
+| `error.code` | `error.code` |
+
+### Share.show
+
+```ts
+show(content: ShareContent): Promise<ShareResult>;
+```
+
+显示分享面板，并以用户的操作 resolve：`"shared"`，带上用户分享到的 `target`（iOS 上是 activity type，Android 上是应用的
+包名，macOS 上是服务的标题，平台不告诉时为 `null`）；或 `"dismissed"`，表示用户关掉了面板。关掉面板是用户的回答，不是失败。
+Rust：`share(request)`，在任务中 await 的回答（`spawn`，或 `async` 的模块函数）。
+
+`"shared"` 的含义以平台能知道的为准：
+
+| 平台 | `"shared"` 表示 |
+|---|---|
+| iOS | 目标已完成分享（取消的邮件或消息为 `"dismissed"`） |
+| macOS | 服务报告已完成；或服务没有报告结果，而用户回到了弹出菜单的窗口（拷贝、加入列表之后，邮件草稿仍开着时也算）。服务报告取消时为 `"dismissed"`；服务没有报告、用户十分钟内也没有回来，同样为 `"dismissed"` |
+| Android | 用户选了一个应用；Android 不告诉该应用之后做了什么 |
+| Web | `navigator.share` 已 resolve |
+
+`show` 从不抛出，所有失败都 reject promise：
+
+- `text`、`url`、`files` 一个都没有（空文本视同没有），或 URL 解析不了、会运行代码（`javascript:`）、指向本地文件（`file:`；
+  请用 `files` 分享）：`TypeError`；
+- 超过 100 个文件、文本或标题超过 1 MiB、URL 超过 16 KiB：`RangeError`；
+- 应用的 `capabilities.fs.read` 没有授予的文件：`ERR_ACCESS_DENIED`；不存在的文件：`ENOENT`；
+- 平台没有分享面板时的分享，或平台不分享的内容（Android 应用自有存储之外的文件、浏览器里的文件、浏览器在此不允许分享或仍在显示之前那次分享的面板）：
+  一个 `code` 为 `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM` 的 `Error`。平台没有面板时，`Share.available()` 可以事先判断。
+
+面板打开时再调用 `show`，之前的 promise 立即 resolve 为 `"dismissed"`。iOS 和 macOS 上新面板取代旧面板；Android 和
+Web 上旧面板留到用户关掉为止，旧面板打开期间浏览器拒绝新的分享。iPad 和 macOS 上面板是
+popover：把打开它的视图（分享按钮，可以在页面、标题栏、对话框或另一个窗口里）交给 `anchor`，没有时显示在窗口中央。
+
+iOS 上，应用说明了写入相册的理由时，面板才提供把图片存到“照片”：在 `ios.infoPlist` 中写
+`NSPhotoLibraryAddUsageDescription`（[Info.plist 键](../docs/packaging.md#infoplist-keys-and-entitlements)）。
+
+一个旅行计划应用从分享按钮分享行程：
+
+```rust tabs
+use nsh_core::prelude::*;
+use nsh_core::share::{ShareAction, ShareRequest};
+
+fn share_button(trip: &'static str) -> impl IntoElement {
+    let button = element_ref();
+    view()
+        .element_ref(&button)
+        .role(AccessibilityRole::Button)
+        .accessibility_label("Share")
+        .on_press(move || {
+            let request = ShareRequest::new()
+                .title("Weekend in Kyoto")
+                .url(format!("https://example.com/trips/{trip}"))
+                .anchor(&button);
+            let shared = share(request);
+            spawn(async move {
+                match shared.await {
+                    Ok(outcome) if outcome.action == ShareAction::Shared => log::info!("shared"),
+                    Ok(_) => {}
+                    Err(error) => log::warn!("cannot share: {error}"),
+                }
+            });
+        })
+        .child(text("Share"))
+}
+```
+
+```tsx tabs
+import { Share, Text, View, type ViewRef } from "nsh";
+
+function ShareButton(props: { trip: string }) {
+  let button: ViewRef | undefined;
+  const share = async () => {
+    try {
+      const { action } = await Share.show({
+        title: "Weekend in Kyoto",
+        url: `https://example.com/trips/${props.trip}`,
+        anchor: button,
+      });
+      if (action === "shared") console.log("shared");
+    } catch (e) {
+      console.warn("cannot share", e);
+    }
+  };
+  return (
+    <View ref={button} role="button" accessibilityLabel="Share" onPress={share}>
+      <Text>Share</Text>
+    </View>
+  );
+}
+```
+
+| 平台 | 分享面板 | 文件 |
+|---|---|---|
+| iOS | `UIActivityViewController`；iPad 上是 popover | 应用能读的任何文件 |
+| Android | `ACTION_SEND` 的选择器（多个文件时 `ACTION_SEND_MULTIPLE`） | 应用自己存储中的文件（`process.dataDir`、缓存），以 `content:` URI 分享 |
+| macOS | 分享菜单 `NSSharingServicePicker` | 应用能读的任何文件 |
+| Web | 浏览器提供的 `navigator.share`，且页面允许 `web-share` | 文本和链接 |
+
+在 Windows、Linux 和 GPUI 窗口中，`Share.available()` resolve 为 `false`，`show` 以
+`ERR_FEATURE_UNAVAILABLE_ON_PLATFORM` reject，应用可以提供别的方式（比如复制链接）。
+
+### Share.available
+
+```ts
+available(): Promise<boolean>;
+```
+
+`show` 在这里能否显示分享面板：平台有分享面板，且应用的能力授予了它。应用据此决定是否显示分享按钮。Rust：`share_available()`。
+
+### 测试
+
+`nsh test` 在无界面运行时回答分享：`app.onShare({ action, target })` 设定回答（没设定时为 `"dismissed"`）并让
+`Share.available()` 为 true，`app.shares()` 返回应用分享过的内容（`{ title, text, url, files }`）。见[测试](../docs/testing-and-trace.md)。
+
+> [!NOTE]
+> 应用在 `nsh.json` 中声明了 `capabilities` 时，需要用 `"share": true` 授予分享面板，分享的每个文件也要能被 `fs.read` 读取。
+> 没有授予时 `Share.available()` resolve 为 `false`，`show` 以一个 `Error` reject，其 `code` 为 `"ERR_ACCESS_DENIED"`，
+> `permission` 为 `"share"`，`resource` 为 `""`。见[沙箱与能力](../docs/sandbox-and-capabilities.md)。
+
 ## Notifications
 
 `Notifications` 显示系统通知并设置应用图标的角标（macOS 上是 Dock 图标）。在用户做了需要通知的操作时再请求权限，然后显示：
@@ -2056,6 +2242,14 @@ Rust 代码使用 `nsh_core::prelude` 的 `request_notification_permission`、`s
 
 ```tsx
 await Notifications.show({ id: "sync", title: "Synced", body: "12 new photos", silent: true });
+```
+
+`sound` 播放应用自带的声音来代替系统默认提示音，让用户分辨出这个应用的通知（例如新的客户消息）；`silent: true` 优先于它。传入打包的资源路径或导入的声音。`nsh package` 会把应用的声音复制到系统读取的位置：Apple 平台从 `Library/Sounds` 按文件名播放不超过 30 秒的 `.caf`、`.aiff`、`.wav`，所以每个声音的文件名要不同；Android 播放 `.ogg`、`.mp3`、`.wav` 原始资源，每个声音一个通知渠道，用户可在系统设置里修改；Linux 把文件交给通知服务（`sound-file`）。Windows（未打包的应用）、Web，以及找不到声音的平台播放默认提示音。
+
+```tsx
+import ding from "./sounds/message.caf";
+
+await Notifications.show({ id: "chat:42", title: "Ada", body: "Are you there?", sound: ding });
 ```
 
 ### Notifications.closeAll
@@ -2138,7 +2332,7 @@ const UrlScheme: {
 | 平台 | `url()` | `setUrl(url)` |
 | --- | --- | --- |
 | Web，应用占据整个页面 | 页面的地址：加载时的地址、`setUrl` 设置的地址，或浏览器后退回到的那条记录的地址 | 替换当前历史记录的地址，与 `history.replaceState` 一样解析（相对于页面的 `<base href>`），在同一轮压入或弹出的页面的历史记录之后生效；带 `history: "push"` 时，像 `history.pushState` 一样在它之后新建一条自己的记录（见下文） |
-| 原生平台，以及 iframe 中的 Web | 最后一个打开应用的链接（启动应用的链接同时作为第一个 `open` 到达），或之后 `setUrl` 设置的地址；两者都没有时为 `null` | 为 `url()` 保存这个 URL，带 `history: "push"` 时也一样（没有可以压入的历史记录）；把它交给系统（Handoff、App Links）由嵌入应用负责 |
+| 原生平台，以及 iframe 中的 Web | 最后一个打开应用的链接（启动应用的链接同时作为第一个 `open` 到达），或之后 `setUrl` 设置的地址；两者都没有时为 `null` | 为 `url()` 保存这个 URL，带 `history: "push"` 时也一样（没有可以压入的历史记录）；在 iOS 和 macOS 上，开启了的应用还会把它交给系统（[见下文](#handoff)） |
 
 URL 不是字符串、超过 16 KiB 或含有空白字符时抛出 `TypeError`；在 Web 上应用占据整个页面时，不是页面同源 URL 的地址同样抛出 `TypeError`。
 应用只有一个地址，Rust 读的也是它，`url()` 直接读取它：链接、Rust 的 `set_app_url` 和 `setUrl` 的改动都立即可见。在上表的平台上，启动应用的链接在应用的代码运行之前就已到达，所以第一次调用 `url()` 就能读到它，它同时也作为第一个 `open` 到达（在 Web 上，页面的地址从一开始就在）。
@@ -2197,6 +2391,10 @@ UrlScheme.on("change", ({ url }) => current.set(tabOf(url)));
 地址归页面的记录，不另建记录（就像 `onChange` 设置的那样）；在弹出页面的那一轮，它是后退落到的那条记录之后的一条记录。压入当前显示的
 地址不会新建记录；同一轮里最后的地址生效，压入优先于替换。`history` 为其他值时抛出 `TypeError`。Rust 调用
 `set_app_url_with(url, HistoryBehavior::Push)`（`nsh_core::url_scheme`）。
+
+#### Handoff
+
+在 iOS 和 macOS 上，应用用 `nsh.json` 的 `"handoff": true` 把地址交给系统（嵌入应用设置 `NshAppView.handoff`，或 Rust 选项中的 `handoff`）：`setUrl` 设置的地址成为当前的 `NSUserActivity`，Handoff 可以在用户的其他设备上接着打开它。`http(s)` 地址是网页，另一台设备在浏览器中打开它。其他绝对地址由另一台设备上的应用自己接着打开（Handoff 只在同一开发团队签名的应用之间进行），作为 `open` 到达的链接（属于 `schemes` 中的 scheme）；`nsh package` 会在 `NSUserActivityTypes` 中声明它的活动类型 `<id>.url`。相对地址只属于应用自己。Android 没有 App Links 的对外对应物，只为 `url()` 保存地址。
 
 ### UrlScheme.on("change")
 

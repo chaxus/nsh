@@ -97,6 +97,21 @@ expect Files refused: rejected RangeError
 expect Size refused: rejected RangeError
 expect Files: pending
 covers [nsh] Picker
+# mod-share
+tap id:case-mod-share
+# no share sheet there: available() resolves false and show rejects as
+# unavailable, never as shared; content it refuses rejects first, by kind.
+expect Available: false
+expect Shown: not shown
+tap id:share
+expect Shown: rejected ERR_FEATURE_UNAVAILABLE_ON_PLATFORM
+expect Empty: rejected TypeError
+expect Local URL: rejected TypeError
+expect Many: rejected RangeError
+expect File: rejected ERR_ACCESS_DENIED
+expect Blank: rejected TypeError
+expect Long URL: rejected RangeError
+covers [nsh] Share
 # mod-speech
 tap id:case-mod-speech
 # nothing recognizes speech there: available() resolves false and a session
@@ -160,15 +175,17 @@ expect Listener: stopped
 covers [nsh] UrlScheme
 # mod-updater
 tap id:case-mod-updater
-# no packaged app: no package runs, none is offered, there is nothing to
+# no packaged app: no package runs, no update (a channel's) or package is offered, there is nothing to
 # download or restart into, and the shell has no packaged version.
 expect Running package: none
 expect Shell: none build none, packages false
 expect NSH version: semver
+expect Update: null
 expect Check: null
 expect Download: rejected
 expect Restart: rejected
 covers [nsh/updater] checkForPackage
+covers [nsh/updater] checkForUpdate
 covers [nsh/updater] downloadPackage
 covers [nsh/updater] restartToPackage
 covers [nsh/updater] runningPackage

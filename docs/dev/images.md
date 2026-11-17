@@ -11,7 +11,10 @@
   divisor) played by a discrete `CAKeyframeAnimation` on `contents` (a tinted animated image shows its first frame); Android
   (API 28+) uses `ImageDecoder` → `AnimatedImageDrawable`, not cached (each view plays its own copy; no blur); a GIF below
   API 30 (from API 26) plays from a `Movie` of its own (see the pitfall in `pitfalls.md`). `onLoad` reports the
-  source's size in pixels on both platforms, whatever size the view decodes at. Downloads are shared per URI (also between
+  source's size in pixels on both platforms, whatever size the view decodes at. On iOS and macOS only the formats that
+  animate (GIF, APNG, WebP, HEIF and AVIF sequences, JPEG XL) play their images as frames; a still file of several
+  images shows one, the icon size that fits for ICO, ICNS and CUR and the primary image otherwise (a TIFF's first
+  page), and `onLoad` reports that image's size (`nsh_platform_apple::image_source`). Downloads are shared per URI (also between
   views decoding at different sizes) and report `onProgress` at most every 100ms; `Image.getSize` / `Image.prefetch` (Rust,
   `nsh_core::runtime`) ask with `Command::ImageInfo`, are answered by the root's `ImageInfo` event (which the core
   resolves, never JS) and keep the downloaded bytes in a data cache (32 MB) until a view
@@ -168,8 +171,12 @@
   natural layout size of `image()` independently: a 200×100 buffer drawn at 2× can lay out at 100×50 points.
   Without it, `rgba` lays out at its pixel width and height in points. The builder sets the source's existing
   size metadata, as `ImageAsset::size` does; the key, pixel data and reported pixel dimensions stay the same.
-  Windows, macOS, Linux and GPUI take the pixels in their decoder closures (`from_rgba`: a copy into their own
-  format, no decode, no downsampling); every other path
+  Windows, macOS, Linux and GPUI take the pixels in their decoder closures (`from_rgba`: no decode or
+  downsampling). macOS scans the alpha bytes: fully opaque buffers become sRGB `NoneSkipLast` CGImages over a
+  data provider holding the original `ImageData`, with no pixel copy or premultiplication; the provider releases
+  its source when its last image reference goes away. Buffers with transparency still copy and premultiply into
+  bitmap storage. The existing budget reservation remains conservative (backing storage plus a display copy).
+  The other backends copy into their own format; every other path
   reading `ImageData::bytes()` (iOS's `NSData`, Android's `Native.imageBytes`, the web's `image_bytes`, `getSize`)
   gets an uncompressed PNG (stored deflate blocks) built once on first use. Old frames leave the caches as any
   unshown source does (L3 never keeps in-memory bytes; L4 entries without a lease are evicted).

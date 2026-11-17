@@ -31,6 +31,7 @@ use self::{
 use crate::ffi;
 
 mod css;
+pub(crate) use css::family_list;
 mod hit;
 mod wrap;
 
@@ -1055,15 +1056,10 @@ impl TextEngine for WebTextEngine {
                         Points(self.x_height(&css, size)),
                     )
                 };
-                let (up, down) = a.extent(font, alignments.get(a.index));
+                let (up, down) = alignments.extent(a, font);
                 (
                     a.index,
-                    (
-                        a.width.0,
-                        a.ascent(font, alignments.get(a.index)).0,
-                        up.0,
-                        down.0,
-                    ),
+                    (a.width.0, alignments.ascent(a, font).0, up.0, down.0),
                 )
             })
             .collect();

@@ -39,6 +39,8 @@ mount(App);
 
 省略 `schema` 时编辑器使用起步 schema（`starterSchema()`）；省略 `plugins` 时它得到起步套件（`starterKit()`：起步的输入规则和键位绑定、基础键位绑定和历史）。空的 `plugins` 数组创建一个完全没有插件的编辑器。
 
+`onCompositionChange({ composing })` 在此视图开始输入法组合输入时报告 `true`，结束时报告 `false`，取消也会报告结束。组合中的文本更新保持当前状态。回调执行时，会话的 `composing` 值和已提交文本已经更新，应用可以在组合输入期间保留编辑器视图，在结束时释放它。开始或取消组合输入可以保持文档及其修订号不变；`onChange` 报告文档修改。
+
 ## 样式
 
 编辑器以应用的外观绘制文档：`classes` 和 `styles` 设置它的各个部件（`root`、`content`、`caret`、`selection`、`placeholder`、`composition`、`selectedNode`、`listMarker`、触摸选区的手柄 `selectionHandle`、`selectionHandleStart`、`selectionHandleEnd`，以及表格的 `selectedCell`、`tableGrip`、`tableResizeHandle`、`tableDropIndicator`），按类型设置节点（`nodes: { heading: "text-2xl font-bold", "heading[level=2]": "text-xl" }`），以及设置标记（`marks: { bold: "font-bold" }`）。节点规格把 `extra.listMarker` 设为 `"bullet"` 或 `"ordered"` 的列表（starter schema 的列表）中，每一项都在 `listMarker` 部件中显示标记：按层级显示 `•`、`◦`、`▪`，或从列表的 `start` 开始编号，放在列表项之前、列表的缩进中（如浏览器缩进 `ul`，在列表上设置 `pl-6`）。
@@ -63,6 +65,8 @@ mount(App);
 ```tsx
 <RichEditor editor={editor} class="max-h-40 px-3 py-2" />
 ```
+
+`onContentSizeChange={({ contentSize }) => …}` 与 `Input` 的同名事件一样，在已排版文档的尺寸变化时报告，每帧最多一次。`contentSize` 是完整内容流的尺寸，单位为点，包含视口外的块，不含 `content` 部件的内边距，且独立于固定的视口高度。滚动不会触发该事件，滚动偏移请用 `onScroll`。
 
 ### 触摸选区
 
@@ -172,6 +176,7 @@ const canIndent = editor.can(sinkListItem("listItem"));
 | `isEmpty`、`undoDepth`、`redoDepth`、`composing` | 界面显示的编辑器信息 |
 | `setContent(content, format?)` | 替换文档，作为一次可撤销的修改 |
 | `insertContent(content, format?)` | 在选区处插入内容 |
+| `pasteHTML(html)`、`pasteText(text)` | 像粘贴一样把 HTML 或纯文本放到选区处；返回是否粘贴了内容 |
 | `getJSON()`、`getHTML()`、`getMarkdown()`、`getText()`、`textBetween(from?, to?, separator?)` | 某种格式的文档 |
 | `dispatch(tr)` | 应用以 JSON 给出的事务（其步骤基于当前文档） |
 | `on(event, listener)` | 每次发生 `event` 后，在 JS 的下一轮以它的数据调用 `listener`：`revision`（`{ revision }`，每次修改之后，无论来自何处）、`update`、`selectionUpdate`、`transaction`、`focus`、`blur`、`delete`。返回一个停止监听的函数；在组件渲染期间添加的监听器随组件一起停止 |
@@ -255,6 +260,8 @@ const editor = createRichEditor({ extensions: [StarterKit, Stock] });
 
 组件对每个节点只运行一次。它的 props 跟随节点：在 JSX 或 effect 中读取时，节点的属性或选中状态变化，`node`（`{ type, attrs, textContent }`）与 `selected` 就地更新；在节点前后输入不会调用组件。`editor` 是节点所在的编辑器，`extension` 是 `{ name, options }`。`getPos()` 返回节点当前的起始位置（节点删除后为 `null`）；`updateAttributes(attrs)` 设置部分属性，`deleteNode()` 删除节点，两者都是经由编辑器（及其 `dispatchTransaction`）的一次可撤销修改。
 
+按在视图自身的区域上会选中它的节点，并让编辑器获得焦点，行内视图和块级视图都是如此（ProseMirror 点击原子节点也会选中它）；按住 Shift 时改为扩展选区，按住 Mod 时与在文字上按下的效果相同。视图里的控件（`Button`、`Link`）照常处理自己的按下，选区保持不变。
+
 应用的 crate 通过其 UI 集注册用 Rust 编写的扩展，JS 按名称取用：
 
 ```rust
@@ -308,6 +315,39 @@ editor.setDecorations("suggestions", [{ from: 5, to: 9, kind: "inline", attrs: {
 - `captureKeys(keys, handler)`：`capturing` 为 true 时，编辑器消费这些按键，并随即告诉 `handler` 按下的是哪一个；键盘响应与没有插件时一样快。
 - `editor.setDecorations(key, decorations)`：视图绘制在文档之上、不改变文档的行内属性、节点属性和小部件。它们随每次修改移动，直到再次设置。
 - `filterTransaction(hook)` 和 `appendTransaction(hook)` 在应用自己的调用（`run`、`dispatch`、`setContent`……）中看到这些调用产生的事务：`filterTransaction` 可以丢弃一个事务，`appendTransaction` 可以返回一个与之一起应用的事务。`on("revision", …)` 收到每次修改，包括输入。
+
+#### 粘贴
+
+插件可以用 ProseMirror 的 `transformPasted` 和 `handlePaste` 参与粘贴：
+
+```tsx
+const paste = new RichEditorPlugin("paste")
+  .transformPasted((slice) => slice)
+  // Word 的列表项、Google Docs 的加粗、单独粘贴的视频链接：由应用自己读取剪贴板。
+  .handlePaste((slice, clipboard) => {
+    if (!isVideoLink(clipboard.text)) return false;
+    editor.run(insertContent({ type: "video", attrs: { src: clipboard.text } }));
+    return true;
+  });
+```
+
+- `transformPasted(slice)` 在内容插入前修改它，各插件依次运行。内容是 `RichSliceJSON`（`{ content, openStart, openEnd }`），优先按 schema 的规则从剪贴板的 HTML 解析，没有 HTML 时从纯文本解析。
+- `handlePaste(slice, clipboard)` 返回 `true` 表示应用已经处理了这次粘贴，编辑器不再插入内容。`clipboard` 是 `{ text, html }`，即剪贴板里的内容。应用如果要按自己的方式读取 Word 或 Google Docs 的 HTML、Markdown 或链接，就自己插入结果（`editor.run(insertContent(...))`）并返回 `true`。
+
+应用自己清洗剪贴板里的 HTML（Word 的列表、Google Docs 的外壳、转成 HTML 的 Markdown）时，用 `editor.pasteHTML(html)`
+把结果接着粘贴进去并返回 `true`；纯文本用 `editor.pasteText(text)`。它们就是 ProseMirror 的 `pasteHTML` 和 `pasteText`：
+内容按粘贴的方式读取，即按 schema 的规则解析并适配选区，所以标了 `isolating` 的节点（带图注的图片）会完整保留，而
+`insertContent(html, "html")` 会把它打开；编辑器自己的粘贴步骤（链接、字数限制、粘贴规则）照常生效。插件的 `transformPasted`
+和 `handlePaste` 不会再被调用。返回值表示是否粘贴了内容。
+
+```tsx
+const paste = new RichEditorPlugin("paste").handlePaste((_slice, clipboard) => {
+  const docs = /^<b id="docs-internal-guid-[^"]*">([\s\S]*)<\/b>$/.exec(clipboard.html);
+  return docs ? editor.pasteHTML(docs[1]) : false;
+});
+```
+
+粘贴是唯一会等待 JS 的输入：插件一旦有粘贴钩子，粘贴就会在钩子都给出结果之后（晚一个 JS 轮次）才插入。多次粘贴按发生的顺序插入。钩子运行期间文档或选区发生变化的粘贴，会按编辑器当时的状态重新执行。打字和按键从不等待。要插入需要更长时间的内容（例如上传），就让 `handlePaste` 返回 `true`，由应用在内容准备好时再插入。
 
 ## 链接、字数统计与建议
 

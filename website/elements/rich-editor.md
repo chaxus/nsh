@@ -50,6 +50,12 @@ Without `schema` an editor uses the starter schema (`starterSchema()`); without 
 (`starterKit()`: the starter's input rules and key bindings, the base key bindings and the history). An empty
 `plugins` array makes an editor with no plugins at all.
 
+`onCompositionChange({ composing })` reports `true` when this view starts input-method composition and `false`
+when it ends, including cancellation. Updates to the text being composed keep the current state. The callback
+observes the session's updated `composing` value and any committed text, so an app can retain the editor view
+while composition is active and release it when it ends. Starting or canceling composition can keep the document
+and its revision unchanged; `onChange` reports document edits.
+
 ## Styling
 
 The editor draws the document with the app's look: `classes` and `styles` style its parts (`root`, `content`, `caret`,
@@ -86,6 +92,11 @@ document scrolls in. A chat composer is an editor with a `maxHeight` and no heig
 ```tsx
 <RichEditor editor={editor} class="max-h-40 px-3 py-2" />
 ```
+
+`onContentSizeChange={({ contentSize }) => …}` reports the laid-out document's size when it changes, as
+`Input`'s does, at most once per frame. `contentSize` is its full flow size in points, including blocks outside
+the viewport and excluding the `content` part's padding. It stays independent of a fixed viewport height.
+Scrolling does not report a change; use `onScroll` for the offset.
 
 ### Touch selection
 
@@ -228,6 +239,7 @@ const canIndent = editor.can(sinkListItem("listItem"));
 | `isEmpty`, `undoDepth`, `redoDepth`, `composing` | What a UI shows about the editor |
 | `setContent(content, format?)` | Replaces the document, as one undoable change |
 | `insertContent(content, format?)` | Inserts content over the selection |
+| `pasteHTML(html)`, `pasteText(text)` | Pastes HTML or plain text over the selection as a paste of it would go in; whether it pasted |
 | `getJSON()`, `getHTML()`, `getMarkdown()`, `getText()`, `textBetween(from?, to?, separator?)` | The document in a format |
 | `dispatch(tr)` | Applies a transaction given as JSON (its steps against the current document) |
 | `on(event, listener)` | Calls `listener` with the payload of every `event`, in JS's next turn: `revision` (`{ revision }`, after every change, from any source), `update`, `selectionUpdate`, `transaction`, `focus`, `blur`, `delete`. Returns a function that stops it; a listener added while a component renders stops with the component |
@@ -348,6 +360,10 @@ the node never calls it. `editor` is the editor the node is in, `extension` is `
 where the node starts now (`null` once it is gone); `updateAttributes(attrs)` sets some of its attributes and
 `deleteNode()` deletes it, each one undoable change through the editor (and its `dispatchTransaction`).
 
+A press on a view's own area selects its node and gives the editor the focus, inline views as block ones (ProseMirror
+selects a clicked atom too); with Shift held it extends the selection instead, and with Mod held it does what it does
+on text. A control inside the view (a `Button`, a `Link`) keeps its press, and the selection stays where it was.
+
 An app's crate registers extensions written in Rust through its UI set, and JS takes them by name:
 
 ```rust
@@ -409,6 +425,47 @@ editor.setDecorations("suggestions", [{ from: 5, to: 9, kind: "inline", attrs: {
 - `filterTransaction(hook)` and `appendTransaction(hook)` see the transactions the app's own calls make (`run`,
   `dispatch`, `setContent`, …) in that call: `filterTransaction` may drop one, `appendTransaction` may return one
   more to apply with it. `on("revision", …)` hears every change, typing included.
+
+#### Paste
+
+A plugin can take part in a paste with ProseMirror's `transformPasted` and `handlePaste`:
+
+```tsx
+const paste = new RichEditorPlugin("paste")
+  .transformPasted((slice) => slice)
+  // Word's list items, Google Docs' bold, a video link pasted on its own: the app reads the clipboard itself.
+  .handlePaste((slice, clipboard) => {
+    if (!isVideoLink(clipboard.text)) return false;
+    editor.run(insertContent({ type: "video", attrs: { src: clipboard.text } }));
+    return true;
+  });
+```
+
+- `transformPasted(slice)` changes the content before it goes in, each plugin's in turn. The content is a
+  `RichSliceJSON` (`{ content, openStart, openEnd }`), parsed from the clipboard's HTML by the schema's rules, else
+  from its text.
+- `handlePaste(slice, clipboard)` returning `true` means the app handled the paste and the editor inserts nothing.
+  `clipboard` is `{ text, html }`, what the clipboard held: an app that reads Word or Google Docs HTML, Markdown or a
+  link in its own way inserts the result itself (`editor.run(insertContent(...))`) and returns `true`.
+
+An app that cleans up the clipboard's HTML itself (Word's lists, Google Docs' wrapper, Markdown turned into HTML)
+hands the result on with `editor.pasteHTML(html)` and returns `true`; plain text goes on with `editor.pasteText(text)`.
+They are ProseMirror's `pasteHTML` and `pasteText`: the content is read as a paste is, by the schema's parse rules and
+fitted to the selection, so a node marked `isolating` (a figure with its caption) stays whole where
+`insertContent(html, "html")` would open it, and the editor's own paste steps (links, character limits, paste rules)
+apply. The plugins' `transformPasted` and `handlePaste` are not asked again. They return whether something was pasted.
+
+```tsx
+const paste = new RichEditorPlugin("paste").handlePaste((_slice, clipboard) => {
+  const docs = /^<b id="docs-internal-guid-[^"]*">([\s\S]*)<\/b>$/.exec(clipboard.html);
+  return docs ? editor.pasteHTML(docs[1]) : false;
+});
+```
+
+Paste is the one input that waits for JS: once a plugin has a paste hook, the paste goes in after the hooks have
+answered, a JS turn later. Pastes go in in the order they were made. A paste whose document or selection changes
+while its hooks answer starts over from the editor as it is then. Typing and keys never wait. To insert something
+that takes longer, such as an upload, `handlePaste` returns `true` and the app inserts it when it is ready.
 
 ## Links, character counts and suggestions
 

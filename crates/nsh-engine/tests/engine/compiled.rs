@@ -75,7 +75,7 @@ fn start() -> (Engine, Receiver<MountBatch>) {
         limits: nsh_engine::Limits::default(),
         ui_sets: Vec::new(),
         runtime: None,
-        data_dir: None,
+        support_dir: None,
         cache: nsh_engine::CacheOptions::off(),
         storage: None,
         clock: Default::default(),
@@ -88,6 +88,7 @@ fn start() -> (Engine, Receiver<MountBatch>) {
         audio: None,
         windows: None,
         login_item: None,
+        data_dir: None,
     };
     (
         Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap(),
@@ -255,7 +256,7 @@ fn start_app_culling(
         limits: nsh_engine::Limits::default(),
         ui_sets: vec![nsh_base::registry(), crate::test_ui::registry()],
         runtime: None,
-        data_dir: None,
+        support_dir: None,
         cache: nsh_engine::CacheOptions::off(),
         storage: None,
         clock: Default::default(),
@@ -268,6 +269,7 @@ fn start_app_culling(
         audio: None,
         windows: None,
         login_item: None,
+        data_dir: None,
     };
     (
         Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap(),
@@ -426,6 +428,75 @@ fn dialogs_in_a_scroll_view_open_with_content_culling() {
     assert_eq!(modals(&batch), 2);
     assert!(text_id(&batch, "in sheet").is_some());
     assert!(text_id(&batch, "far down").is_some());
+}
+
+const SLIDING_CARDS: &str = r#"import { createAnimatedValue, mount, Scroll, Text, View } from "nsh";
+
+// A page of sections that fade and slide 14pt up into place as they appear.
+function Card(props: { index: number }) {
+  const t = createAnimatedValue(0);
+  t.timing(1, { duration: 300, delay: Math.min(8, props.index) * 40 });
+  const y = t.interpolate({ inputRange: [0, 1], outputRange: [14, 0] });
+  return (
+    <View style={{ height: 200, opacity: t, transform: [{ translateY: y }] }}>
+      <Text>{`card ${props.index}`}</Text>
+    </View>
+  );
+}
+
+mount(() => (
+  <Scroll style={{ flex: 1 }}>
+    {Array.from({ length: 30 }, (_, i) => (
+      <Card index={i} />
+    ))}
+  </Scroll>
+));
+"#;
+
+/// Sections that slide in by a few points are culled as still ones: the
+/// page makes those near the screen, not all of them in its first frames,
+/// and the others as it scrolls to them.
+#[test]
+fn sliding_sections_are_made_as_they_come_near() {
+    let (engine, rx) = start_app_culling(SLIDING_CARDS, (px(44.0), px(96.0)), true);
+    let mut texts = Vec::new();
+    let mut scroll = None;
+    // Every batch the start sends, its paced views included.
+    while let Ok(batch) = rx.recv_timeout(Duration::from_millis(500)) {
+        for item in &batch.items {
+            match item {
+                MountItem::Text { text, .. } => texts.push(text.text.to_string()),
+                MountItem::Create {
+                    id,
+                    kind: nsh_core::ViewKind::Scroll,
+                } => scroll = Some(*id),
+                _ => {}
+            }
+        }
+    }
+    let has = |texts: &[String], t: &str| texts.iter().any(|x| x == t);
+    // 844pt of screen and one around it: cards 0 to 8 (8 starts at 1600,
+    // 14pt of slide short of 1688), not 9 (1800) and on.
+    assert!(has(&texts, "card 0") && has(&texts, "card 8"), "{texts:?}");
+    assert!(
+        !has(&texts, "card 9") && !has(&texts, "card 29"),
+        "{texts:?}"
+    );
+    // Scrolled to the end, the last cards come.
+    engine.control().scroll(
+        scroll.expect("the scroll view"),
+        nsh_core::geometry::point(Points(0.0), Points(6000.0 - 844.0)),
+        0,
+    );
+    let mut texts = Vec::new();
+    while let Ok(batch) = rx.recv_timeout(Duration::from_millis(500)) {
+        for item in &batch.items {
+            if let MountItem::Text { text, .. } = item {
+                texts.push(text.text.to_string());
+            }
+        }
+    }
+    assert!(has(&texts, "card 29"), "{texts:?}");
 }
 
 const MODAL_DISMISS: &str = r#"import { mount, signal, Text, View } from "nsh";

@@ -598,6 +598,13 @@ export interface MouseEvent {
   pressedButton: MouseButton | null;
   /** The button that changed at this event: the released one on `onMouseUp`, `null` on a move. */
   button: MouseButton | null;
+  /** `"mouse"`, or `"pen"` for a pen over a tablet. */
+  pointerType: PointerType;
+  /** How hard it presses, 0 to 1 (`PointerEvent.pressure`): 0.5 with a button down and 0 without on a device without pressure. */
+  pressure: number;
+  /** A pen's tilt in degrees, -90 to 90 (`PointerEvent.tiltX` / `tiltY`); 0 when not reported. */
+  tiltX: number;
+  tiltY: number;
 }
 
 /** A wheel over a view: the payload of `onWheel` (GPUI's `ScrollWheelEvent`, the DOM's `WheelEvent`). */
@@ -1095,6 +1102,7 @@ pub const INTERNAL_EVENTS: &[EventKind] = &[
     EventKind::Pick,
     EventKind::OpenUrl,
     EventKind::ScreenColor,
+    EventKind::Share,
     EventKind::CanvasImage,
     EventKind::FileRequest,
     EventKind::Speech,

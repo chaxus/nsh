@@ -163,7 +163,8 @@ impl Editor {
     }
 
     fn text(&self) -> String {
-        self.ns_text().to_string()
+        let string = self.ns_text();
+        input_text(&string, NSRange::new(0, string.length()))
     }
 
     /// The text an input method is composing in the editor (its marked
@@ -186,7 +187,7 @@ impl Editor {
         {
             return None;
         }
-        Some(string.substringWithRange(range).to_string())
+        Some(input_text(&string, range))
     }
 
     fn is_empty(&self) -> bool {
@@ -707,7 +708,7 @@ impl Ctx {
         // Until `changed` reports the edit, the composition it changes is
         // not looked at (the editor may unmark before it replaces).
         input.editing.set(true);
-        let mut text = replacement.to_string();
+        let mut text = input_text(replacement, NSRange::new(0, replacement.length()));
         if text.is_empty() {
             if range.length > 0 {
                 self.key_press("Backspace");
@@ -2090,6 +2091,50 @@ thread_local! {
     static FORGOTTEN: RefCell<Vec<(NshView, Retained<NSView>)>> = const { RefCell::new(Vec::new()) };
 }
 
+/// Warms AppKit's text system once per process, a while after `surface`
+/// first showed and when it does not animate
+/// ([`crate::surface::when_idle`]): the first `NSTextView` (and
+/// `NSScrollView`) of a process sets up TextKit (its classes, the system
+/// font's cascade, the layout machinery), about 10 ms of the main thread
+/// that would otherwise hold the frame that mounts the first multi-line
+/// input. Nearly every app has inputs, so this is paid by an idle moment
+/// instead of a page's first frame. Process-wide, as what it warms is.
+pub(crate) fn warm_later(surface: &Surface) {
+    thread_local! {
+        static SCHEDULED: Cell<bool> = const { Cell::new(false) };
+    }
+    if !SCHEDULED.replace(true) {
+        crate::surface::when_idle(surface, warm_text);
+    }
+}
+
+fn warm_text() {
+    let mtm = MainThreadMarker::new().expect("main queue");
+    let scroller =
+        NSScrollView::initWithFrame(NSScrollView::alloc(mtm), ns_rect(0.0, 0.0, 100.0, 40.0));
+    scroller.setHasVerticalScroller(true);
+    let text = NSTextView::initWithFrame(NSTextView::alloc(mtm), ns_rect(0.0, 0.0, 100.0, 40.0));
+    text.setRichText(false);
+    text.setAllowsUndo(true);
+    text.setFont(Some(&objc2_app_kit::NSFont::systemFontOfSize(13.0)));
+    text.setString(&NSString::from_str("Aa"));
+    scroller.setDocumentView(Some(&text));
+    // SAFETY: NSTextView's TextKit 2 objects and their methods, when it has
+    // them (nil otherwise).
+    unsafe {
+        let manager: Option<Retained<AnyObject>> = msg_send![&text, textLayoutManager];
+        if let Some(manager) = manager {
+            let content: Option<Retained<AnyObject>> = msg_send![&manager, textContentManager];
+            if let Some(content) = content {
+                let all: Option<Retained<AnyObject>> = msg_send![&content, documentRange];
+                if let Some(all) = all {
+                    let _: () = msg_send![&manager, ensureLayoutForRange: &*all];
+                }
+            }
+        }
+    }
+}
+
 /// `Input`.
 pub(crate) fn config(surface: &Rc<Surface>, view: &NshView, config: &InputConfig) {
     let Some(input) = view.state().input.clone() else {
@@ -3196,9 +3241,53 @@ fn clip_utf16(s: &str, max: usize) -> &str {
     s
 }
 
+/// The editor's UTF-16 range as the text an app receives.
+fn input_text(string: &NSString, range: NSRange) -> String {
+    // Input methods can leave an unpaired surrogate in their text or marked
+    // range. NSString's UTF8String is null then, so its Display conversion
+    // cannot be used. Read UTF-16 without changing the native composition.
+    let mut units = vec![0; range.length];
+    // SAFETY: The caller supplies a range within the string. The buffer has
+    // room for every UTF-16 unit, and its pointer is non-null when empty too.
+    unsafe {
+        string.getCharacters_range(std::ptr::NonNull::new(units.as_mut_ptr()).unwrap(), range);
+    }
+    String::from_utf16_lossy(&units)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_text_preserves_unicode_and_replaces_incomplete_surrogates() {
+        let string = NSString::from_str("a😀かな");
+        for (range, expected) in [
+            (NSRange::new(0, 5), "a😀かな"),
+            (NSRange::new(1, 2), "😀"),
+            (NSRange::new(1, 1), "�"),
+            (NSRange::new(2, 1), "�"),
+            (NSRange::new(3, 2), "かな"),
+            (NSRange::new(5, 0), ""),
+        ] {
+            assert_eq!(input_text(&string, range), expected);
+        }
+    }
+
+    #[test]
+    fn input_text_accepts_an_edit_with_unpaired_surrogates() {
+        let mut units = [0x306b, 0xd800, 0x307b, 0xdc00];
+        // SAFETY: The initialized buffer contains units.len() UTF-16 units.
+        // NSString accepts unpaired surrogates, as AppKit's editor does.
+        let string = unsafe {
+            NSString::initWithCharacters_length(
+                NSString::alloc(),
+                std::ptr::NonNull::new(units.as_mut_ptr()).unwrap(),
+                units.len(),
+            )
+        };
+        assert_eq!(input_text(&string, NSRange::new(0, 4)), "に�ほ�");
+    }
 
     #[test]
     fn single_line_placeholder_matches_native_editor_metrics() {

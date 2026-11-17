@@ -122,6 +122,11 @@ struct WindowData {
     /// makes one) must not reach `DefWindowProc`, which beeps for a menu
     /// mnemonic it cannot find.
     sys_char: Cell<bool>,
+    /// What its frame took around its client area when last measured
+    /// ([`frame_extents`]): while it has no client area (minimized, or not
+    /// placed again yet) its rects say nothing about it, and the system
+    /// asks for its track sizes then.
+    extents: Cell<Option<(i32, i32, i32, i32)>>,
     /// Where the window was before it went full screen.
     windowed: Cell<Option<WINDOWPLACEMENT>>,
     /// Its frame's style bits before it went full screen.
@@ -237,6 +242,7 @@ pub(crate) fn create(
         last_press: Cell::new((0, (0, 0), 0)),
         surrogate: Cell::new(0),
         sys_char: Cell::new(false),
+        extents: Cell::new(None),
         windowed: Cell::new(None),
         windowed_style: Cell::new(0),
         shell: crate::shell::Shell::new(nsh_core::desktop::WindowKind::Normal),
@@ -343,6 +349,7 @@ pub(crate) fn create_app_window(
         last_press: Cell::new((0, (0, 0), 0)),
         surrogate: Cell::new(0),
         sys_char: Cell::new(false),
+        extents: Cell::new(None),
         windowed: Cell::new(None),
         windowed_style: Cell::new(0),
         shell,
@@ -396,8 +403,13 @@ pub(crate) fn fit_content(hwnd: HWND, content: (i32, i32)) {
 }
 
 /// What `hwnd`'s frame takes around its client area, in pixels: left, top,
-/// right, bottom.
+/// right, bottom. A minimized window (an icon parked off screen) and one
+/// the system has not placed again yet have no client area: their rects
+/// say nothing about their frame, which the system asks for all the while
+/// (it restores them to the track sizes it gets). What the frame took the
+/// last time it could be measured is what it takes.
 pub(crate) fn frame_extents(hwnd: HWND) -> (i32, i32, i32, i32) {
+    let data = data(hwnd);
     let (mut window, mut client) = (RECT::default(), RECT::default());
     let mut origin = POINT::default();
     // SAFETY: queries with local out values.
@@ -406,15 +418,26 @@ pub(crate) fn frame_extents(hwnd: HWND) -> (i32, i32, i32, i32) {
             || GetClientRect(hwnd, &mut client).is_err()
             || !windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut origin).as_bool()
         {
-            return (0, 0, 0, 0);
+            return data.and_then(|d| d.extents.get()).unwrap_or((0, 0, 0, 0));
         }
     }
-    (
+    let collapsed = client.right <= client.left || client.bottom <= client.top;
+    if collapsed && let Some(extents) = data.and_then(|d| d.extents.get()) {
+        return extents;
+    }
+    let extents = (
         origin.x - window.left,
         origin.y - window.top,
         window.right - (origin.x + client.right),
         window.bottom - (origin.y + client.bottom),
-    )
+    );
+    // A measurement of no client area is not one of the frame.
+    if let Some(data) = data
+        && !collapsed
+    {
+        data.extents.set(Some(extents));
+    }
+    extents
 }
 
 /// What `hwnd` holds of the app's window API.
@@ -1459,6 +1482,8 @@ fn handle(
                 WM_POINTERCAPTURECHANGED => PointerKind::Cancel,
                 _ => PointerKind::Move,
             };
+            let sample = pen_sample(id, info.pointerType.0 == 3);
+            crate::input::set_pen_sample(id + 2, Some(sample));
             crate::input::pointer(
                 surface,
                 PointerEvent {
@@ -1475,11 +1500,20 @@ fn handle(
                     clicks: 1,
                 },
             );
+            if matches!(kind, PointerKind::Up | PointerKind::Cancel) {
+                crate::input::set_pen_sample(id + 2, None);
+            }
             return Some(LRESULT(0));
         }
         WM_SETCURSOR if lo(lparam.0) == HTCLIENT as i32 => {
             update_cursor(surface, hwnd, scale);
             return Some(LRESULT(1));
+        }
+        // The Menu key's or Shift+F10's own request (no pointer: -1) after
+        // the key opened NSH's menu: answered here, as `DefWindowProc` would
+        // pass it on to the parent window of an embedded surface.
+        WM_CONTEXTMENU if lparam.0 == -1 && crate::input::keyboard_context_menu_opened(surface) => {
+            return Some(LRESULT(0));
         }
         WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP => {
             let event = key_event(msg, wparam, lparam);
@@ -1735,6 +1769,49 @@ fn sys_close(hwnd: HWND, lparam: LPARAM) -> crate::shell::SysClose {
             SysClose::Menu
         }
     }
+}
+
+/// The pressure and tilt contact `id` reports (`pen`: a pen, else a
+/// finger), from `GetPointerPenInfo` / `GetPointerTouchInfo`.
+fn pen_sample(id: u32, pen: bool) -> crate::input::PenSample {
+    use windows::Win32::UI::Input::Pointer::{
+        GetPointerPenInfo, GetPointerTouchInfo, POINTER_PEN_INFO, POINTER_TOUCH_INFO,
+    };
+    // PEN_MASK_PRESSURE, PEN_MASK_TILT_X, PEN_MASK_TILT_Y; TOUCH_MASK_PRESSURE.
+    const PRESSURE: u32 = 0x1;
+    const TILT_X: u32 = 0x4;
+    const TILT_Y: u32 = 0x8;
+    const TOUCH_PRESSURE: u32 = 0x4;
+    let mut sample = crate::input::PenSample {
+        pen,
+        pressure: None,
+        tilt: (0.0, 0.0),
+    };
+    if pen {
+        let mut info = POINTER_PEN_INFO::default();
+        // SAFETY: a local out value.
+        if unsafe { GetPointerPenInfo(id, &mut info) }.is_ok() {
+            let mask = info.penMask;
+            if mask & PRESSURE != 0 {
+                sample.pressure = Some((info.pressure as f32 / 1024.0).clamp(0.0, 1.0));
+            }
+            if mask & TILT_X != 0 {
+                sample.tilt.0 = info.tiltX as f32;
+            }
+            if mask & TILT_Y != 0 {
+                sample.tilt.1 = info.tiltY as f32;
+            }
+        }
+    } else {
+        let mut info = POINTER_TOUCH_INFO::default();
+        // SAFETY: a local out value.
+        if unsafe { GetPointerTouchInfo(id, &mut info) }.is_ok()
+            && info.touchMask & TOUCH_PRESSURE != 0
+        {
+            sample.pressure = Some((info.pressure as f32 / 1024.0).clamp(0.0, 1.0));
+        }
+    }
+    sample
 }
 
 /// True when a mouse message was synthesized from touch or pen input,

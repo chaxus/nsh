@@ -277,8 +277,8 @@ look once closed, so the reader never sees stray `**` or `[`. A last line whose 
 appears once its line ends: a list marker alone, a `-` or `=` line under a paragraph, a code fence's opening line or a
 closer half typed, so each list item, heading and code block appears as what it will be. A `*` inside a word (`a*b`)
 stays as written. Once the reply ends (`streaming` off), the text is read as written. Blocks are kept by position: the
-blocks that are complete keep their views, and only the block being written is made again, so a long reply stays
-cheap to update.
+blocks that are complete are read once and keep their views, and each update reads and makes again only the block
+being written, so a long reply stays cheap to update.
 
 `streamingCaret` follows the end of the document: inline at the end of the last text, wherever the last block ends (a
 paragraph, a list item, a code block, a table's last cell), else on a line of its own after the last block (a rule,
@@ -846,6 +846,7 @@ parts with [`TextViewParts`](#typed-part-styles).
 |---|---|---|
 | `selectedText({ format? })` | `selected_text(Option<TextSelectionOptions>)` | The selection of a `selectable` view: `format` `"plain"` (default, as Copy takes it), `"markdown"` or `"html"`, the selected nodes rebuilt; the source as written when all of it is selected ([As Markdown or HTML](./text-selection.md#as-markdown-or-html)). `""` when nothing is selected. |
 | `onImagePress` | `.on_image_press(\|image: &Image\| ..)` | An image not in a link was pressed: `{ image }`, for the app to show it larger (a zoomable viewer of its own). |
+| `onTaskPress` | `.on_task_press(\|event: &TextViewTaskPressEvent\| ..)` | The box of a task item was pressed: `{ index, checked }`, which task of the document (from 0, in reading order) and the state the press asks for. The document does not change: the app gives the view its edited source. |
 
 ## Accessibility
 
