@@ -186,6 +186,13 @@ nsh package --target web --asset-url https://cdn.example.com/debugger/
 
 页面随之在 `/apps/counter/` 下引用自己的文件，应用的相对 URL 也相对于它解析，在 `https://example.com/apps/counter/sports/football` 和在 `https://example.com/apps/counter/` 一样能加载。`"base": "/"` 表示站点位于主机的根路径。`nsh package --target web --run` 在这个路径下提供站点。路径的各段由 ASCII 字母、数字、`-`、`.`、`_` 和 `~` 组成，其他字符按浏览器发送时的方式做百分号编码（`/应用/` 写作 `/%E5%BA%94%E7%94%A8/`）。
 
+### 支持的浏览器
+
+发布的应用需要 Safari 16.4（iOS 和 iPadOS 16.4）、Chrome 和 Edge 97、Firefox 108 及以上版本。页面通过 import map
+加载模块，并使用这些版本才有的 JavaScript 内置函数（`Object.hasOwn`、`Array.prototype.findLastIndex`、
+`OffscreenCanvas`）；更早的浏览器，例如 iOS 15 的 Safari 或旧版 Android 的 WebView，会显示空白页面。NSH 不为它们附带
+polyfill，现代浏览器因此不必多下载任何内容。
+
 ### 运行时大小
 
 打包时为每个应用链接一个专属的 `nsh.<digest>.wasm`：其中包含引擎，以及应用首屏导入的 `nsh/base` 组件、标准模块和着色器。应用其他页面导入的部分在首屏显示后于后台下载。应用的 crate [在 Rust 中调用浏览器 API](#在-rust-中使用浏览器-api) 时，它的 `nsh.<digest>.wasm` 包含整个运行时以及它自己的 crate。以下数据由 `nsh package --target web` 实测（MB 按 10^6 字节计）：
@@ -300,6 +307,7 @@ const player = await createPlayer(document.querySelector("#phone"), {
   // idiom: "phone",        // 强制 "phone"、"pad" 或 "desktop"；不设置时由指针和尺寸决定
   // history: false,        // 页面和对话框是否作为浏览器历史记录；默认只在应用占据整个页面时开启，iframe 里不开启
   // dialogs: "viewport",   // Dialog 和 AlertDialog 覆盖整个浏览器窗口；默认覆盖容器
+  // overlays: "viewport",  // Popover、菜单、提示等锚定浮层显示在整个浏览器窗口之上；默认在容器内
 });
 await player.runModule(new URL("./bundle.js", location.href).href);
 ```
@@ -318,6 +326,8 @@ await player.runModule(new URL("./bundle.js", location.href).href);
 （`runModule(url, { capabilities })`）：用户离开时不会询问应用，页面离开时它的 `quit` listener 仍会运行。
 
 Dialog、Sheet 和 AlertDialog 默认覆盖容器。设置 `dialogs: "viewport"` 后，它们像页面自己的模态对话框一样覆盖整个浏览器窗口，应用的窗口仍是容器：`Dialog` 按窗口的尺寸和安全区域布局，从窗口底边滑入，背景覆盖整个页面，在它上面滚动鼠标滚轮时页面保持不动。对话框显示在浏览器的顶层（Chrome 114、Safari 17、Firefox 125 及更新版本），所以无论容器在页面的什么位置，它都在页面其他内容之上；更早的浏览器里它覆盖容器。
+
+Popover、菜单、提示、`Select` 和 `Combobox` 的列表、编辑器的联想列表，以及其他所有锚定在元素上的浮层（`<Overlay anchor>`）默认显示在容器内。页面只给应用布局中的一小块时，比如 250 像素高的短评发布框里有一个 360 像素高的话题选择层，可以设置 `overlays: "viewport"`：浮层改为显示在整个浏览器窗口之上，不再被容器裁掉。它们按窗口（而不是容器）的边缘和安全区域定位和翻转，页面滚动或容器移动时跟随锚点，点击页面上浮层之外的任何地方会像在应用里点击一样关闭它们。在浮层上的点击、键盘焦点和 Escape 行为不变，覆盖窗口的对话框仍在它们之上，所以设置 `overlays: "viewport"` 的页面也要设置 `dialogs: "viewport"`。浮层显示在浏览器的顶层（Chrome 114、Safari 17、Firefox 125 及更新版本）；更早的浏览器里它们留在容器内。没有锚点的浮层（`fixed` 视图、底部面板的背景等）留在容器内。
 
 ## 宿主的函数
 

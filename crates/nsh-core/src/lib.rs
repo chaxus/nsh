@@ -13,6 +13,7 @@ pub use byte_size::ByteSize;
 pub mod access;
 pub mod animation;
 pub mod audio;
+pub mod auth_session;
 pub mod canvas;
 pub mod clipboard;
 pub mod color;
@@ -89,6 +90,8 @@ extern crate self as nsh_core;
 /// The values registered native components take and emit (props, events,
 /// command arguments): JSON.
 pub use serde_json::Value as JsonValue;
+#[doc(hidden)]
+pub use text::ApproxPrepared;
 
 pub use crate::{
     color::{Hsla, Rgba},
@@ -109,17 +112,18 @@ pub use crate::{
     },
     ops::{
         AutoCapitalize, AutoFill, CellSlot, Command, ContextMenuEvent, Dialog, DialogButton,
-        DialogButtonStyle, EditAction, EventKind, EventMask, EventPayload, FpsMode, Haptic,
-        HapticImpact, HapticNotification, HeaderItem, HeaderItemContent, HeaderSlot,
+        DialogButtonStyle, DialogInput, EditAction, EventKind, EventMask, EventPayload, FpsMode,
+        Haptic, HapticImpact, HapticNotification, HeaderItem, HeaderItemContent, HeaderSlot,
         HeaderSystemItem, IMAGE_SCALES, ImageProp, ImageScales, ImageSource, KeyboardAppearance,
         KeyboardDismissMode, KeyboardTaps, KeyboardType, ListAlignment, ListContentStyle,
         ListViewport, ModalAnimation, ModalPresentation, ModalProp, MouseButton, MouseEvent,
         NativeProp, NodeId, Op, OverlayProp, PasteBehavior, PasteEvent, PastedFile, PayloadValue,
         PinchEvent, PinchPhase, PointerType, PressEvent, Prop, ROOT_ID, ResizeMode, ReturnKeyType,
         RevealOptions, ScreenAnimation, ScreenProp, ScrollAlignment, ScrollProp, ScrollbarSetting,
-        SnapAlignment, StatusBarConfig, StatusBarSetting, StatusBarStyle, SubmitBehavior, Tag,
-        TouchEvent, TouchPhase, TouchPoint, TransitionFallback, Viewability, WebElement, WebInput,
-        WebKey, WebLoad, WebSource, WheelDelta, WheelEvent,
+        SheetDetent, SnapAlignment, StatusBarConfig, StatusBarSetting, StatusBarStyle,
+        SubmitBehavior, Tag, TouchEvent, TouchPhase, TouchPoint, TransitionFallback, Viewability,
+        WebElement, WebInput, WebKey, WebLoad, WebSource, WheelDelta, WheelEvent,
+        dialog_default_button,
     },
     props::{
         Accessibility, AccessibilityActionDef, AccessibilityCurrent, AccessibilityProp,

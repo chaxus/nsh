@@ -19,6 +19,8 @@ cargo clippy -p nsh-platform-macos -p nsh-macos-host -p nsh-macos-app --all-targ
 cargo test -p nsh-platform-macos --features dev   # needs no window server: tests do not start AppKit
 cargo build -p nsh-macos-host                     # ./target/debug/nsh-macos-host
 cargo test -p nsh-platform-macos --test native -- --ignored # desktop session required
+# Editor/RichEditor focus restoration and stale-target checks:
+NSH_MODAL_FOCUS_CHECK_ONLY=1 cargo test -p nsh-platform-macos --test native -- --ignored
 # Mounting rows that are not virtualized, measured alone (tests/native/mount.rs):
 NSH_MOUNT_BENCH_ONLY=1 cargo test --release -p nsh-platform-macos --test native -- --ignored
 ```
@@ -28,9 +30,27 @@ server client, log forwarding, the error overlay: `dev.rs`). The runtime needs m
 
 ## Dialog fades
 
+Closing a modal restores the previous keyboard focus inside the remaining scope when no other control has
+taken it. Editor and RichEditor caret sinks reject pointer targeting but still receive keyboard focus;
+restoration checks keyboard visibility, attachment and exit state independently of pointer targeting.
+Hidden or removed inputs stay unfocused.
+
 A dialog's ordinary fade out retains its native view hierarchy until the animation ends, so AppKit keeps
 compositing glass and backdrop materials. It leaves the input scope immediately; reopening a retained modal
 finishes its previous fade before presenting it again. Slide and shader transitions keep their snapshot path.
+
+## Short pointer presses
+
+The pointer adapter keeps a successful short press's `active:` feedback visible
+briefly when AppKit delivers down and up together, as with trackpad tap-to-click.
+Press and touch callbacks still run at release. A new press or cancellation clears
+pending feedback, and removed views and stopped surfaces leave no retained feedback.
+Reduced motion and the native test driver keep immediate visual release; the
+headless driver is unchanged. The ordinary-window checks in
+`tests/native/tap_feedback.rs` exercise same-turn events, a following held press,
+drag cancellation and teardown (`NSH_TAP_FEEDBACK_CHECK_ONLY=1`).
+`NSH_TAP_FEEDBACK_PLAIN_ONLY=1` restricts that check to non-transition styles;
+animated feedback requires a window connected to a screen.
 
 ## Nested shaders
 
@@ -110,7 +130,10 @@ belong to the app, which owns retention and its storage budget.
   sibling content layer (`canvas.rs` `layer_split`, `NshView::update_canvas_overlay`). Animated values redraw only
   that surface; a new drawing redraws both. The geometry scan includes every suffix paint, including constant
   shapes after animated ones. Complex compositing, unbounded or large suffixes, and long prefixes use the existing
-  path. Both surfaces follow the view's clipping, opacity, scale and visibility. Contents stay in the screen's format.
+  path. An unsplit canvas whose visible operations cover less than three quarters of the view sizes its content layer
+  to their 32-point-tile-aligned bounds (`CanvasState::content_bounds`, translating the context by `-frame.origin`),
+  and a canvas that paints nothing visible removes its content layer instead of allocating a backing store. Both
+  surfaces follow the view's clipping, opacity, scale and visibility. Contents stay in the screen's format.
 - **No masks on what scrolls, where avoidable** (`visual.rs`): the window server pays for a mask on every frame its
   layer moves, so shadows and inset shadows avoid masks where their background allows.
 - **Out-of-sight content is not drawn** (`Mounter::draw_when_shown`): text and canvases whose content changes (a
@@ -212,9 +235,14 @@ belong to the app, which owns retention and its storage budget.
   it is: AppKit would shrink a window taller than its screen when it shows it, and a test's window keeps the size the
   test opens it at on a shorter secondary display. nsh.json `window` applies before the window shows (its attributes,
   size, place, display and mode; with `restoreBounds` the placement the engine kept in the app's storage, which the runner reads first).
-  With `defaultVisible: false` the window is made and its app runs, but it is not ordered in: the mode it opens in
-  waits on the surface (`main_open_mode`) for the first `show()` / `focus()`, a link (`application:openURLs:`) or
-  the Dock's reopen to show it (`window::main_shown`). A development host holds its first show until the first app
+  With `defaultVisible: false` the window is made and its app runs, but it is not ordered in. It takes the mode it
+  opens in as `setMode` does: a zoom leaves a window ordered out, but AppKit shows a window that enters full screen,
+  so a hidden window (this one, one `hide()` hid, also while it leaves full screen to be ordered out, a new
+  `Window.open` one before its first frame) holds a full screen `setMode` or `setPlacement` asks for
+  (`Watch::full_screen_on_show`), its state reading the mode, and enters it once it is ordered in and no transition
+  animates (`window_state::shown`): the first `show()` / `focus()`, a link (`application:openURLs:`) or the Dock's
+  reopen (`window::main_shown`); a window ordered in elsewhere (an embedding app's own) enters it on the
+  notification of its order-in (`NSWindowDidChangeOcclusionStateNotification`). A development host holds its first show until the first app
   came (`Running::held`): the app's `defaultVisible` decides whether it shows, at the host's size and in the normal
   mode, as every app's window (the other launch options apply where a runner makes the window). An error shows the
   window while it is hidden (held, or hidden by the app: a tray app whose startup failed), so it is seen; a reload
@@ -246,7 +274,7 @@ belong to the app, which owns retention and its storage budget.
 | Dialogs (`Dialog`) | `navigation.rs` | Children of the root above the app's views, at the size of the surface, sliding up or fading in: transparent layers with no look of their own, showing only the app's popup and backdrop (`presentation` is ignored) |
 | Shaders | `shader.rs` | `Shader` frames as a sublayer's IOSurface (the GPU renders into it; a `CGImage` read back without Metal) under the children; effects and transitions draw their children through the shader from `renderInContext:` pictures of their container, masked while the frames show over it; a page's or a dialog's `transitionShader` as a layer over the stack or the root (`NavOverlay`); see [shaders.md](shaders.md) |
 | Transitions | `transition.rs` | `LayoutAnimation`, style transitions and keyframes on frame callbacks (Linux's); curves, interpolation and timing are `nsh_core::transition`'s, and native animation values are written through `nsh_core::animation` (`animation.rs`), as on the other desktops |
-| Alerts (`AlertDialog`) | `system.rs` | `NSAlert`, placed as open and save panels are (next row: `window::panel_window`): a sheet of the window the user is in while the user sees it, else (a tray app's hidden main window, the app hidden, the window minimized or off every screen, a surface in no window) on its own, in front, an inactive app activated first. On its own an alert is app-modal (`runModal`, `system::run_alone`), one at a time, and the app's batches go on while it shows (`pitfalls.md`); the app stopping or its surface dropped takes its alerts away unanswered. NSAlert puts two buttons in a row, its first rightmost, and stacks more, its first on top but the Return button moved above all: up to two alert buttons are added in reverse with the cancel button last (they read in order, cancel leftmost) and the last regular one is the default; more, and action sheets' options, are added in order with the cancel button last and no default (iOS's order). Cancel is Escape; destructive buttons have `hasDestructiveAction`. |
+| Alerts (`AlertDialog`) | `system.rs` | `NSAlert`, placed as open and save panels are (next row: `window::panel_window`): a sheet of the window the user is in while the user sees it, else (a tray app's hidden main window, the app hidden, the window minimized or off every screen, a surface in no window) on its own, in front, an inactive app activated first. On its own an alert is app-modal (`runModal`, `system::run_alone`), one at a time, and the app's batches go on while it shows (`pitfalls.md`); the app stopping or its surface dropped takes its alerts away unanswered. NSAlert puts two buttons in a row, its first rightmost, and stacks more, its first on top but the Return button moved above all: up to two alert buttons are added in reverse with the cancel button last (they read in order, cancel leftmost) and the last regular one is the default; more, and action sheets' options, are added in order with the cancel button last and no default (iOS's order). Cancel is Escape; destructive buttons have `hasDestructiveAction`. An alert's `input` is an `NSTextField` accessory view. |
 | Open and save panels (`pick_paths`, `pick_save_path`, `Picker.pickFiles`, `Picker.pickImages`) | `file_requests.rs`, `picker.rs` | `NSOpenPanel` / `NSSavePanel` as a sheet of the window the user is in (`window::sheet_window`: the app's own titled window that has the keyboard, else the main window) while the user sees that window. A sheet of a window out of sight would stay out of sight with it: while the window is hidden (a tray app's main window, `defaultVisible: false`, or the app hidden), minimized or wholly off every screen (`NSWindow.screen` nil), the panel shows in a window of its own, and an inactive app is activated first as `focus()` activates it (`activateIgnoringOtherApps:`; never in the background, as `nsh test` runs it), since such a panel opens behind the front app's windows (`window::panel_window`, `panel_placement`). Alerts follow the same rule (previous row). |
 | Video | `native.rs` | AVFoundation (loaded at run time, as on iOS): an `AVPlayerLayer` in a view that lets the mouse through, or AVKit's `AVPlayerView` with `controls`; the player is made on a frame after the one that mounts the video, once the framework is in (`start_later`, see "First native views"); a live stream (`srcObject`) in an `AVSampleBufferDisplayLayer` fed by `nsh_platform_apple::stream` (`AppView::register_stream`, the same on iOS): the host's `CVPixelBuffer`s (`StreamHandle::push_pixel_buffer`, any format the layer takes, BGRA or biplanar YUV, wrapped in a `CMSampleBuffer` without copying the pixels, made once per frame for every video) or BGRA bytes copied into one (`push_bgra`), the newest per main-queue dispatch, nothing retained while no video shows the stream; its PCM audio (`push_pcm`) through an `AVAudioEngine` and `AVAudioPlayerNode` per video (`stream_audio.rs`, made at the first samples heard), scheduled on the pushing thread as `AVAudioPCMBuffer`s (standard deinterleaved `f32`, more than two channels folded into stereo), the newest dropped past 200 ms queued; `volume` (clamped to 0 to 1) is the player node's, so it applies at once to what is queued, and `paused` or `muted` stops the node at once (the queue and its count reset) and drops new samples; the engine restarts after a device change and stops at the stream's end or when the video detaches; a failure is logged once and silences the output until the stream's end, after which a new registration tries again; on iOS the session follows the video's `audioSession` while it plays, as for a player. `nsh/` names are NSH's: the development host registers `nsh/test-pattern` with `Components::register_reserved_stream` (`#[doc(hidden)]`) |
 | Web views | `native.rs` | `WKWebView` (WebKit loaded at run time, the configuration and the `WKWebView` each made on a frame after the mount: `start_later`, see "First native views"; iOS's bridge: `window.nsh.postMessage`, injected JS, the `webview` capability's navigation policy, every prop, event and command iOS has; the URL schemes the app serves, `url_scheme`, through `nsh-platform-apple`'s `web_scheme`, one `WKURLSchemeHandler` per web view set on its configuration before it is made, shared with iOS); a `file://` `src` loads with `loadFileURL`, reading the file's own folder and nothing above it (`file_read_scope`: `file://localhost/` is the same local path as `file:///`; none for another host, a file at the root or a path with a `.` or `..` segment, which load as plain requests), and the navigation policy lets that web view open any file in that folder or below it, so a local multi-page HTML document can link between its pages; any file URL outside it is refused (`navigation_allowed`); a web view is transparent by default (`drawsBackground = false`), a page without a background showing the view behind it; macOS's web view has no scroll view to turn off, so with `scrollable={false}` the root's `hitTest:` keeps wheel and trackpad scrolls from it (`passes_wheel`) and they scroll the app's scroll views around it (the page's own keys and scripts still scroll it; swipes between pages, `allowsBackForwardNavigationGestures`, are scrolls too) |
@@ -318,6 +346,12 @@ mounts the page, it would hold that frame, so it is paid elsewhere:
 Single-line fields center the native font's line in the input's content box. Their attributed placeholders use
 the same natural line height as the field editor, including when `text-base` supplies a larger `lineHeight` for
 layout. Multiline text views use the configured paragraph line height.
+
+The shared single-line field editor starts left-aligned text at the idle cell's origin. On focus,
+`text_input.rs` restores its clip origin after applying a pending selection, preserving a visible caret.
+Styling and alignment share the active editor; selection notifications resolve it once for selection
+and caret events, and skip native queries when neither event has a listener. Scrolling during editing
+remains AppKit's; centered and right-aligned text keep their native origins.
 
 A key goes to the window's first responder: a field's editor (the window's shared field editor, an `NSTextView`), a
 multiline input's `NshTextView`, a hosted view, or the surface's root. Four steps decide it, in order:
@@ -443,6 +477,9 @@ The paths below keep their existing behavior:
   without modifiers (`charactersByApplyingModifiers:` with none when Shift is held, so Shift+/ is `shift+/`), the US
   layout's (`input::us_key`) when that is not ASCII. The monitor lives as long as the surface: an empty table costs a
   map lookup per key, and the app stopping removes it.
+  While the first responder has marked text, the input method keeps its keys before shortcut matching,
+  including `when: "always"` bindings. This follows `NSTextInputClient` conformance for hosted inputs as well as
+  AppKit text views; shortcuts resume once the client no longer has marked text.
 - Shortcuts NSH matches itself (Cmd+A / C / [ / R) read `input::shortcut_key`: the character without modifiers, or on
   a layout that types none in ASCII the US layout's key, as menus do.
 
@@ -788,6 +825,14 @@ and a named capture matching `shift+a` through the shortcut vocabulary. The port
 and verifies that the focused portal's logical ancestor (`ViewProps::key_parent`) hears its keys and captures `x`,
 while the other portal's `tab` rule neither hears nor captures (Tab is reported uncaptured). Menus' key equivalents under
 a capture and the input method are not in it.
+
+`tests/native/keymap_ime.rs` runs on its own with `NSH_IME_KEYMAP_CHECK_ONLY=1`: a hosted `NSView` implementing
+`NSTextInputClient` keeps Enter, Escape, Left, Space and Backspace while marked text is set, and its shortcuts
+resume after unmarking. It also checks a standard `NSTextView` and an ordinary focus stop. It needs an unlocked
+desktop and the test window to be key so AppKit runs the actual keyboard monitor; when a terminal keeps the
+keyboard focus, launch the built native test as a macOS app through LaunchServices. Set
+`NSH_IME_KEYMAP_SCREENSHOT` to a PNG path to capture the results. Marked text is set through the protocol,
+so this checks native dispatch deterministically rather than a particular system input method.
 
 For a real surface, with a window server and a keyboard:
 

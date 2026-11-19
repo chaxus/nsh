@@ -218,7 +218,7 @@ events! {
     ScrollDragEnd = "onScrollDragEnd": "The user let go of a scroll view (payload: [`EventPayload::Scroll`]).",
     MomentumStart = "onMomentumStart": "A scroll view started gliding after a fling (payload: [`EventPayload::Scroll`]).",
     MomentumEnd = "onMomentumEnd": "A scroll view stopped gliding (payload: [`EventPayload::Scroll`]).",
-    Dialog = "onDialog": "An alert or action sheet closed (root only; payload: `id`, `index`, -1 when dismissed).",
+    Dialog = "onDialog": "An alert or action sheet closed (root only; payload: `id`, `index`, -1 when dismissed, and `value`, the text of its text field when it has one).",
     Touch = "onTouch": "Touches on the view or inside it, for the JS touch and responder handlers (payload: [`EventPayload::Touch`]).",
     SelectionChange = "onSelectionChange": "The selection (or caret) of an input moved (payload: `start`, `end` in UTF-16 units), or the selection of a selectable view changed (payload: `text`, the selected text as a copy gives it, empty once nothing is selected; `start`, where it starts in the view's whole text; `bounds`, the box around it in the view, to which the core adds `pageBounds`).",
     KeyPress = "onKeyPress": "A key was pressed in an input (payload: `key`: the character, `Backspace` or `Enter`).",
@@ -272,6 +272,8 @@ events! {
     DownloadProgress = "onDownloadProgress" as "": "A held download received bytes (payload: [`EventPayload::Json`], [`crate::webview::DownloadProgress`]; never reaches a listener).",
     DownloadEnd = "onDownloadEnd" as "": "A platform's download ended (payload: [`EventPayload::Json`], [`crate::webview::DownloadEnd`]; never reaches a listener).",
     Share = "onShare": "A [`Command::Share`] request finished (root only; payload: `id`, then `action` (`\"shared\"` with the `target` where the platform names it, or `\"dismissed\"`), or `error` with its `code`; [`crate::share`]).",
+    DetentChange = "onDetentChange": "The user moved an iOS sheet dialog to another of its `detents` (dragging it, its grabber, a scroll at its edge, a screen reader; payload: [`EventPayload::Json`], `{ detent }`, [`SheetDetent::change_payload`]).",
+    AuthSession = "onAuthSession" as "": "A [`Command::AuthSession`] request finished (root only; payload: `id`, then the callback `url`, `action` `\"cancelled\"`, or `error` with its `code`; [`crate::auth_session`]; never reaches a listener).",
 }
 
 /// What an input holds, for the system's autofill and suggestions
@@ -1569,7 +1571,9 @@ pub struct HeaderItem {
     /// Optional key for keeping a `UIBarButtonItem` across updates: a kept
     /// button takes the new title, symbol, label, menu and state in place.
     /// Without a key, a button is kept only while its position and its
-    /// content are unchanged; any other change makes a new one.
+    /// content are unchanged; any other change makes a new one. It is also
+    /// the button's accessibility identifier, as a view's `testID` is:
+    /// tests name it by `id:<key>`.
     pub key: Option<Arc<str>>,
     /// What the button shows.
     pub content: HeaderItemContent,
@@ -1796,6 +1800,11 @@ pub enum ScrollProp {
     /// `contentInset`: room around the content.
     #[prop(js = "contentInset", on = SCROLLING)]
     ContentInset(EdgeInsets),
+    /// `scrollbarInset`: how far the scroll indicator keeps from each edge
+    /// of the view, for bars that float over it (React Native's
+    /// `scrollIndicatorInsets`); the content still scrolls under them.
+    #[prop(js = "scrollbarInset", on = SCROLLING)]
+    ScrollbarInset(EdgeInsets),
     /// `contentOffset`: where it starts.
     #[prop(js = "contentOffset", with = crate::js::host_values::content_offset, once, ts = "Partial<Point>", on = SCROLLING)]
     ContentOffset(Point<Points>),
@@ -1967,6 +1976,17 @@ pub enum ScreenProp {
     /// (iOS and Android).
     #[prop(js = "headerTransparent", on = SCREEN)]
     HeaderTransparent(bool),
+    /// `headerShadowVisible` (iOS: the system header; Android's has none):
+    /// the hairline under the header. Off, the bar has no shadow line, as
+    /// iOS 26's own bars.
+    #[prop(js = "headerShadowVisible", default = true, on = SCREEN)]
+    HeaderShadowVisible(bool),
+    /// `headerBackgroundOnScroll` (iOS: the system header; ignored
+    /// elsewhere): with `headerTransparent`, the header stays clear while
+    /// the content rests at its top and shows its background once the
+    /// content scrolls under it, as UIKit's own bars do.
+    #[prop(js = "headerBackgroundOnScroll", on = SCREEN)]
+    HeaderBackgroundOnScroll(bool),
     /// `headerBackTitle` (iOS: the system header; ignored elsewhere): the
     /// label of the back button leading back to this page.
     #[prop(js = "headerBackTitle", on = SCREEN)]
@@ -2065,8 +2085,132 @@ pub enum ModalPresentation {
     FormSheet,
 }
 
+/// A height a bottom sheet rests at (TS `SheetDetent`): `nsh-base`'s
+/// `Sheet` and a dialog presented as an iOS sheet
+/// ([`ModalPresentation::PageSheet`] / [`ModalPresentation::FormSheet`])
+/// take a list of them as `detents`. Measured from the bottom of the
+/// screen, never taller than the screen below the status bar.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SheetDetent {
+    /// About half the screen (TS `"medium"`).
+    Medium,
+    /// The screen below the status bar (TS `"large"`).
+    Large,
+    /// This many points tall (TS `{ height }`).
+    Height(Points),
+    /// This share, from 0 to 1, of the screen below the status bar (TS
+    /// `{ fraction }`).
+    Fraction(Percentage),
+}
+
+impl SheetDetent {
+    /// As JSON: `"medium"`, `"large"`, `{ "height": n }` or
+    /// `{ "fraction": n }`, as JS has it (the payload of
+    /// [`EventKind::DetentChange`]).
+    pub fn to_json(self) -> crate::JsonValue {
+        let object = |key: &str, n: f32| {
+            let mut map = serde_json::Map::new();
+            map.insert(key.to_owned(), serde_json::json!(n));
+            crate::JsonValue::Object(map)
+        };
+        match self {
+            Self::Medium => crate::JsonValue::from("medium"),
+            Self::Large => crate::JsonValue::from("large"),
+            Self::Height(height) => object("height", height.0),
+            Self::Fraction(fraction) => object("fraction", fraction.0),
+        }
+    }
+
+    /// The detent JSON [`Self::to_json`] gives; `None` for anything else.
+    pub fn from_json(value: &crate::JsonValue) -> Option<Self> {
+        if let Some(name) = value.as_str() {
+            return match name {
+                "medium" => Some(Self::Medium),
+                "large" => Some(Self::Large),
+                _ => None,
+            };
+        }
+        if let Some(height) = value.get("height").and_then(|v| v.as_f64()) {
+            return Self::of_height(height);
+        }
+        Self::of_fraction(value.get("fraction").and_then(|v| v.as_f64())?)
+    }
+
+    /// `{ height }`, a height a sheet can rest at: finite, 0 or more.
+    pub(crate) fn of_height(height: f64) -> Option<Self> {
+        (height.is_finite() && height >= 0.0).then_some(Self::Height(Points(height as f32)))
+    }
+
+    /// `{ fraction }`, a share from 0 to 1 (`NaN` is none).
+    pub(crate) fn of_fraction(fraction: f64) -> Option<Self> {
+        (0.0..=1.0)
+            .contains(&fraction)
+            .then_some(Self::Fraction(Percentage(fraction as f32)))
+    }
+
+    /// The payload of [`EventKind::DetentChange`]: `{ detent }`.
+    pub fn change_payload(self) -> EventPayload {
+        let mut map = serde_json::Map::new();
+        map.insert("detent".to_owned(), self.to_json());
+        EventPayload::Json(crate::JsonValue::Object(map))
+    }
+}
+
+impl crate::element::JsValue for SheetDetent {
+    fn ts_type(types: &mut crate::element::TsTypes) -> String {
+        types.declare("SheetDetent", |_| {
+            "/** A height a bottom sheet rests at: `\"medium\"` (about half the screen), `\"large\"` (the screen below the status bar), `{ height }` in points or `{ fraction }` (0 to 1) of the large one. */\n\
+             export type SheetDetent = \"medium\" | \"large\" | { height: number } | { fraction: number };\n"
+                .to_owned()
+        })
+    }
+
+    fn from_js(value: crate::element::JsIn<'_>) -> Result<Self, crate::element::PropError> {
+        use crate::element::JsKind;
+        let wanted = r#""medium", "large", `{ height }` (0 or more) or `{ fraction }` (0 to 1)"#;
+        match value.kind() {
+            JsKind::String => match value.as_string().as_deref() {
+                Some("medium") => Ok(Self::Medium),
+                Some("large") => Ok(Self::Large),
+                _ => Err(value.expected(wanted)),
+            },
+            JsKind::Object => {
+                let height = value.field("height")?;
+                if let Some(height) = height.get().as_number() {
+                    return Self::of_height(height).ok_or_else(|| value.expected(wanted));
+                }
+                let fraction = value.field("fraction")?;
+                fraction
+                    .get()
+                    .as_number()
+                    .and_then(Self::of_fraction)
+                    .ok_or_else(|| value.expected(wanted))
+            }
+            _ => Err(value.expected(wanted)),
+        }
+    }
+
+    fn to_js<'a>(
+        &self,
+        host: &'a dyn crate::element::JsHost,
+    ) -> Result<crate::element::JsOwned<'a>, crate::element::PropError> {
+        use crate::element::JsOwned;
+        let object = |key: &str, n: f32| -> Result<JsOwned<'a>, crate::element::PropError> {
+            let owned = JsOwned::new(host, host.new_object()?);
+            host.set_field(owned.get().raw(), key, host.new_number(f64::from(n)))?;
+            Ok(owned)
+        };
+        match *self {
+            Self::Medium => "medium".to_owned().to_js(host),
+            Self::Large => "large".to_owned().to_js(host),
+            Self::Height(height) => object("height", height.0),
+            Self::Fraction(fraction) => object("fraction", fraction.0),
+        }
+    }
+}
+
 /// A modal option (`<Dialog …>`).
-#[derive(Debug, Clone, Copy, PartialEq, HostProps)]
+#[derive(Debug, Clone, PartialEq, HostProps)]
 pub enum ModalProp {
     /// `animation`: how the dialog appears. Pages and dialogs share the
     /// name, so JS's value arrives as [`ScreenProp::Animation`], which the
@@ -2101,6 +2245,32 @@ pub enum ModalProp {
     /// natively (default true); either way it calls `onCancel`.
     #[prop(js = "closeOnSwipe", default = true, on = MODAL)]
     CloseOnSwipe(bool),
+    /// `detents`: the heights an iOS sheet (`presentation` `"pageSheet"` /
+    /// `"formSheet"`) rests at (none by default: the system's full height).
+    /// The user drags it between them, the system way; past the smallest
+    /// it closes when `closeOnSwipe` allows. Ignored on other platforms and
+    /// presentations: there, `Sheet` (`nsh/base`) rests at detents.
+    #[prop(js = "detents", on = MODAL)]
+    Detents(Vec<SheetDetent>),
+    /// `detent`: the detent of `detents` the sheet rests at: it moves there
+    /// when the value changes. The user's moves stand even when the app
+    /// does not follow them; follow `onDetentChange` to keep the value in
+    /// step.
+    #[prop(js = "detent", on = MODAL)]
+    Detent(Option<SheetDetent>),
+    /// `defaultDetent`: the detent it opens at without `detent` (default
+    /// the smallest).
+    #[prop(js = "defaultDetent", on = MODAL)]
+    DefaultDetent(Option<SheetDetent>),
+    /// `grabber`: the sheet shows the system's grabber at its top (default
+    /// false); screen readers move it between detents with it.
+    #[prop(js = "grabber", on = MODAL)]
+    Grabber(bool),
+    /// `largestUndimmedDetent`: up to this detent of `detents`, what is
+    /// behind the sheet is not dimmed and takes touches (default: dimmed at
+    /// every detent).
+    #[prop(js = "largestUndimmedDetent", on = MODAL)]
+    LargestUndimmedDetent(Option<SheetDetent>),
 }
 
 /// An overlay option (`<Overlay …>`, [`crate::overlay`]).
@@ -2430,6 +2600,10 @@ pub enum Command {
     /// Show an alert or action sheet (on the root); the answer comes back
     /// as [`EventKind::Dialog`].
     Dialog(Box<Dialog>),
+    /// Close the dialog [`Command::Dialog`] showed with this id (on the
+    /// root), as if dismissed, without reporting an answer: the app no
+    /// longer wants one, and the core has already answered it.
+    CloseDialog(u32),
     /// A JS responder took the touches on this view: `block` keeps native
     /// scroll views around it from taking them over.
     SetJsResponder {
@@ -2585,6 +2759,29 @@ pub enum Command {
         /// What to share and where the sheet points.
         sheet: Box<crate::share::ShareSheet>,
     },
+    /// Show a web sign-in session for `page` (on the root;
+    /// [`crate::element::open_auth_session`], [`crate::auth_session`]) and
+    /// report how it ended as [`EventKind::AuthSession`] `id`
+    /// ([`crate::auth_session::AuthSessionOutcome::payload`],
+    /// [`crate::auth_session::AuthSessionError::payload`]). Sent only on
+    /// platforms whose [`crate::platform::Environment::auth_session`] is
+    /// set. iOS answers with the callback URL or a cancellation; Android
+    /// answers a cancellation when the user comes back to the app without
+    /// a callback, and the callback comes as a link of the app's scheme
+    /// ([`EventKind::UrlScheme`]), which ends the session first. A new
+    /// request replaces the one still showing: the core has answered it
+    /// as cancelled already, and the platform closes it where it can.
+    AuthSession {
+        /// The request.
+        id: u32,
+        /// The page and the callback scheme.
+        page: Box<crate::auth_session::AuthSessionPage>,
+    },
+    /// Close the sign-in session [`Command::AuthSession`] showed with this
+    /// id (on the root), without reporting how it ended: the app closed it
+    /// ([`crate::element::close_auth_session`]), and the core has answered
+    /// it as cancelled already. A session no longer showing is left alone.
+    CloseAuthSession(u32),
     /// Let the user pick a color anywhere on the screen (on the root; a
     /// color picker's eyedropper, [`crate::element::ambient::pick_screen_color`]):
     /// the system's color sampler or the browser's `EyeDropper`. Report it
@@ -2946,6 +3143,71 @@ pub struct Dialog {
     pub cancelable: bool,
     /// An action sheet rather than an alert.
     pub sheet: bool,
+    /// A text field in the alert (never in an action sheet); its text comes
+    /// back with the answer as `value`. Platforms whose alert has no text
+    /// field show the alert without one and answer without `value`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<DialogInput>,
+}
+
+/// The text field of a [`Dialog`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+#[non_exhaustive]
+pub struct DialogInput {
+    /// The text it starts with.
+    pub text: String,
+    /// Shown while it is empty.
+    pub placeholder: Option<String>,
+    /// The starting text is selected when the field takes the focus, so
+    /// typing replaces it.
+    pub select_all: bool,
+    /// While it is empty, every button but the cancel ones is disabled,
+    /// and return chooses nothing.
+    pub required: bool,
+}
+
+impl DialogInput {
+    /// A text field starting with `text`.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Shown while it is empty.
+    pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
+        self.placeholder = Some(placeholder.into());
+        self
+    }
+
+    /// Selects the starting text when the field takes the focus.
+    pub fn select_all(mut self, select_all: bool) -> Self {
+        self.select_all = select_all;
+        self
+    }
+
+    /// Disables every button but the cancel ones while it is empty.
+    pub fn required(mut self, required: bool) -> Self {
+        self.required = required;
+        self
+    }
+
+    /// Whether `button` can be pressed while the field holds `text`: a
+    /// cancel button always, the others unless the field is required and
+    /// empty.
+    pub fn enables(&self, button: &DialogButton, text: &str) -> bool {
+        !self.required || !text.is_empty() || button.style == DialogButtonStyle::Cancel
+    }
+}
+
+/// The button return chooses in a dialog: its last regular one (an alert's
+/// default button), `None` without one.
+pub fn dialog_default_button(buttons: &[DialogButton]) -> Option<usize> {
+    buttons
+        .iter()
+        .rposition(|b| b.style == DialogButtonStyle::Default)
 }
 
 /// A non-style property of a host node.
@@ -3171,7 +3433,10 @@ pub enum Prop {
     /// `multiline`: several lines; return inserts a line break.
     #[prop(js = "multiline", on = INPUT)]
     Multiline(bool),
-    /// `maxLength`: the most characters the user can enter.
+    /// `maxLength`: the most characters the user can enter, counted as
+    /// Unicode code points on every platform (an emoji such as 😀 is one).
+    /// A longer paste goes in cut to what fits, never inside a character
+    /// such as an emoji with its skin tone.
     #[prop(js = "maxLength", on = INPUT)]
     MaxLength(Option<u32>),
     /// `readonly`: the user can select and copy the text but not change it.

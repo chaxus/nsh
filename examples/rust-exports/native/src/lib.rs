@@ -3,15 +3,20 @@
 //! ([`Account`]). `App.tsx` imports all three from `rust-exports/native`,
 //! the specifier of the set below (`nsh.json` `"rust": "native"`), and
 //! their TypeScript declarations are generated from these types into
-//! `.nsh/types/rust-exports/native.d.ts`. On the desktops the crate also
-//! registers a native component (`meter.rs`), which `App.tsx` declares with
-//! `nativeComponent`, and on macOS and iOS a live stream (`stream.rs`),
-//! which `App.tsx` plays with `<Video srcObject>`.
+//! `.nsh/types/rust-exports/native.d.ts`. On the desktops and Android the
+//! crate also registers a native component (`meter.rs`), which `App.tsx`
+//! declares with `nativeComponent`, and on macOS and iOS a live stream
+//! (`stream.rs`), which `App.tsx` plays with `<Video srcObject>`.
 
 mod account;
 mod gauge;
 mod ledger;
-#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+#[cfg(any(
+    windows,
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "android"
+))]
 mod meter;
 mod stream;
 
@@ -55,5 +60,11 @@ fn components(components: &nsh_platform_ios::Components) {
 /// The crate's native components on Linux.
 #[native_components(linux)]
 fn components(components: &nsh_platform_linux::Components) {
+    meter::register(components);
+}
+
+/// The crate's native components on Android.
+#[native_components(android)]
+fn components(components: &nsh::Components) {
     meter::register(components);
 }

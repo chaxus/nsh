@@ -37,7 +37,9 @@
   `transform` lists, `translate` / `scale` pairs, shadows' layers (`{ x, y, blur, spread, color, inset }`),
   `pointerEvents`' `box-none` / `box-only` (React Native's, for the view alone), `textOverflow`'s `ellipsis-start` /
   `ellipsis-middle` (where a clamped text is cut), `textAlign`'s `auto` (React Native's: the text's natural side, by its
-  direction); variants past Tailwind's: `selected:` (`accessibilityState.selected`, `selectedStyle`), `ios:` /
+  direction), `transitionTimingFunction`'s `spring(stiffness, damping[, mass])` (class `ease-spring-[k,c]` /
+  `ease-spring-[k,c,m]`, `Styled::ease_spring`: a transition on a spring's physics that times itself,
+  `Transition::spring`; `animation.md`); variants past Tailwind's: `selected:` (`accessibilityState.selected`, `selectedStyle`), `ios:` /
   `android:` / `web:` (the platform), `terminal:` (drawn in a terminal, `Idiom::Terminal`). A new one joins this list.
 - **CSS's meanings**: inline styles mean what classes mean: a style key is the CSS property of its name (or of the form
   "Forms past CSS's" gives it). Every view, however it is styled, keeps
@@ -226,6 +228,10 @@
   `Painter::*_from_view`, `canvas.md`), kept per node in `Style::paint` (`PaintStyle`) and resolved by the core when
   it sends the drawing (`Core::resolved_paint`); views draw nothing with them. `fill-inherit` / `stroke-inherit` set
   nothing (they inherit already).
+- **Accent** (`accentColor`, Tailwind's `accent-*`): CSS's `accent-color`, the color a system control shows its state in.
+  The core passes a native component's own `accentColor` to it as its `accentColor` prop (`Core::sync_accent`), and
+  the control prefers it over the theme color it is otherwise given. Set on the control, not inherited. `nsh/mobile`'s
+  `Switch` reads it (its track when on); the system's segmented control and tab bar could later.
 - **Text style inheritance** (CSS-like): a view's text properties (color, font, size, alignment, ...) pass to the texts and inputs
   inside it, so `class="text-white"` on a button styles its label. So do its `whitespace-*` / `text-wrap` / `text-nowrap`
   (and `truncate`'s no wrapping) and `select-*` classes, as CSS's `white-space` and `user-select: auto` (`Core::inherited_text_props`:

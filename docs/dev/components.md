@@ -52,7 +52,7 @@ Visual rules are changed in the shared layer; `nsh-base` supplies the components
 | Where | What |
 |---|---|
 | `crates/nsh-core/src/element/` | The API (`nsh_core::element`, `prelude`): `Component`, `Module`, `Class` (`class.rs`, `callback.rs`; direct JS values: `js.rs`), elements, `Styled`, `Theme`, `Registry`, the status bar's layers (`status_bar.rs`), the declarations generator `typescript` |
-| `crates/nsh-macros` | `#[component]`, `#[derive(Props)]`, `#[derive(PropEnum)]`, `#[derive(Event)]`, `#[derive(JsObject)]`; `#[methods]`, `#[module]`, `#[class]`; `#[native_module("…")]` (an app crate's set: `docs/dev/tooling.md`); `#[native_components(<platform>)]` (an app crate's native components on Windows, macOS, Linux or iOS: `docs/dev/tooling.md`); `style_helpers!` (the spacing methods of `Styled`) |
+| `crates/nsh-macros` | `#[component]`, `#[derive(Props)]`, `#[derive(PropEnum)]`, `#[derive(Event)]`, `#[derive(JsObject)]`; `#[methods]`, `#[module]`, `#[class]`; `#[native_module("…")]` (an app crate's set: `docs/dev/tooling.md`); `#[native_components(<platform>)]` (an app crate's native components on Windows, macOS, Linux, iOS or Android: `docs/dev/tooling.md`); `style_helpers!` (the spacing methods of `Styled`) |
 | `crates/nsh-core/src/core/components.rs` | The core side: instances, children and slots, events; `core/views.rs`: views, their bindings' patches and regions |
 | `crates/nsh-base/` | `nsh/base`'s components and modules, one file each (`accordion.rs`, its parts on `collapsible.rs`'s reveal, `alert_dialog.rs`, `button.rs`, `checkbox.rs`, `number_input.rs`, `radio.rs`, `slider.rs`, `switch.rs`, `tabs.rs`, `select.rs` on `listbox.rs`; `command.rs`, its items indexed once and filtered natively per query, its moves of the highlight `listbox.rs`'s; `emoji_picker/`, the emoji's data and the picker on `command.rs`'s model; `tree.rs`, its items flattened natively into the rows the expanded items show; `color_picker/`, `ColorPicker` and its parts over a color as each space's channels hold it (`model.rs`: the conversions, OKLCH's gamut mapping, the CSS forms it reads and writes); `numeric.rs`, the rules of a number in a range with a step that `Slider` follows and of a number typed as text that `NumberInput` follows; `keys.rs`, the keys a focused control binds; `TextView`, `ResizablePanelGroup`, `DockArea`, `Editor` and `DiffView` directories, `text_view/`, `resizable/`, `dock/`, `editor/`, `diff/`; `rich_editor/`, `RichEditor`'s headless kernel, `docs/dev/rich-editor.md`; `syntax.rs`, the syntax highlighting `TextView` and `Editor` share), one `Registry` (`lib.rs`) |
 | `crates/nsh-base/` | `nsh/base`'s components and modules, one file each (`accordion.rs`, its parts on `collapsible.rs`'s reveal, `alert_dialog.rs`, `button.rs`, `carousel.rs`, `avatar.rs`, `checkbox.rs`, `number_input.rs`, `radio.rs`, `slider.rs`, `switch.rs`, `tabs.rs`, `select.rs` on `listbox.rs`; `command.rs`, its items indexed once and filtered natively per query, its moves of the highlight `listbox.rs`'s; `emoji_picker/`, the emoji's data and the picker on `command.rs`'s model; `tree.rs`, its items flattened natively into the rows the expanded items show; `color_picker/`, `ColorPicker` and its parts over a color as each space's channels hold it (`model.rs`: the conversions, OKLCH's gamut mapping, the CSS forms it reads and writes); `numeric.rs`, the rules of a number in a range with a step that `Slider` follows and of a number typed as text that `NumberInput` follows; `keys.rs`, the keys a focused control binds; `TextView`, `ResizablePanelGroup`, `DockArea`, `Editor` and `DiffView` directories, `text_view/`, `resizable/`, `dock/`, `editor/`, `diff/`; `rich_editor/`, `RichEditor`'s headless kernel, `docs/dev/rich-editor.md`; `syntax.rs`, the syntax highlighting `TextView` and `Editor` share), one `Registry` (`lib.rs`) |
@@ -96,7 +96,9 @@ Visual rules are changed in the shared layer; `nsh-base` supplies the components
   AlertDialogOptions) -> Result<AlertDialogResult, String> }` is `await AlertDialog.show({ … })` in JS (`nsh-base`
   `alert_dialog.rs`). A module named like a component adds static functions to it.
 - **System UI**: `nsh_base::alert_dialog().title(..).cancel(..).destructive(..).show()` (TSX's `AlertDialog.show({ … })`:
-  await an `AlertDialogResult`, whose `action` is the chosen action's id, `None` when closed without one), `dismiss_keyboard()`, a screen's
+  await an `AlertDialogResult`, whose `action` is the chosen action's id, `None` when closed without one, and `value`
+  the text of an alert's `.input(..)`: the system's own text field where the platform's alert has one, iOS, Android,
+  macOS and the web; elsewhere the alert shows without it), `dismiss_keyboard()`, a screen's
   or modal's `.status_bar(..)` (as a view controller's `preferredStatusBarStyle`; a `StatusBarStyle` alone, a
   `StatusBarSetting` or a closure of one), `ModuleCx::set_status_bar(patch)`
   for the default under them; `.inset_padding(..)` / `.inset_margin(..)` on an element; the safe area and the keyboard as styles: `.pt_safe_area()`, `.pb_keyboard()` (`styles.md` "Environment variables").
@@ -211,9 +213,8 @@ reasons: `reactive-components.md`.
     the app's function in a root of its own under the component's owner (so context reaches it), inserts what it
     returns into a holder view (`componentRender`: the prop, U+001F, the key) and the holder into the host, replacing
     the key's previous one; the core places the holder as the only child of the key's placeholder (the last one placed
-    when a view places a key twice, skipping those in list cells their lists freed: a cell whose row went still reads
-    the row now at its old index until the list binds it again, so it may place the key of a row that moved to another
-    cell, which keeps showing it; none placed: it waits out of the tree for the `Unrender`). Until its holder
+    when a view places a key twice; a list shows each row in one cell at most, so a row's key is placed once;
+    none placed: it waits out of the tree for the `Unrender`). Until its holder
     arrives a placeholder is empty, so a list cell holding one is not measured (`Core::cells_awaiting_renders`): its
     row keeps its estimate (or its last size) and stays in the window, and is measured in the commit the holder
     comes in; measured empty, a list in a view sized by its content would shrink that view's viewport to nothing
@@ -292,8 +293,12 @@ reasons: `reactive-components.md`.
   stack (an `Each` of the routes: the screens below keep their state; `on_dismiss` reports a native pop). The root
   can be any element: the host becomes it (a screen, a modal, a text, a list); a component as the root is made on
   the host itself (no view of its own); a region as the root goes in the host view.
-  The core reuses retained `each` rows in the same key order while their item bindings update the content
-  (`core/components.rs`). Region placement checks the actual child order before moving nodes
+  An update of an `each` passes its rows in order and keeps each one while the key in its place is its own: no map
+  of the rows, and nothing written for a row whose item is equal. Only from the first place whose key is another
+  are the rows left looked up by key (`Rows::update`, `element/flow.rs`; with a key twice among the rows the map
+  of them all decides, as before). The core likewise leaves the elements a run starts with, kept in their places,
+  as they are while their item bindings update the content, and matches only what follows them
+  (`reconcile_region`, `core/views.rs`). Region placement checks the actual child order before moving nodes
   (`core/views.rs`), after updating anchors and slots. Regions that only populate or retain nodes skip listener and
   binding cleanup. When nodes leave, affected views are cleaned once per binding batch; recycled list cells use the
   same boundary when their static children leave.
@@ -957,8 +962,9 @@ what changed.
   lays out again; JS is not involved). Each cell's content (`Inner::VirtualRow`) is made once, under an owner of its
   own made under the owner `virtual_list` was called in (the view's, or a `when` / `dynamic` / `each` run's), so the
   rows see that run's context and are disposed with it (also when the list is passed as another component's `Items`; a list a later run keeps moves to that run, and the earlier run's end leaves it alone); it shows the row its `Position` says: a memo of the list's count and keys moves the cells' index signals
-  (`move_rows`) before the bindings that read them run, so a change runs only the bindings of the rows that changed
-  and never shows a row with another row's data. With keys, a row that stays keeps its cell and size wherever it
+  (`move_rows`), and a cell's `Position` brings that memo up to date before its index or count is read, so whichever
+  of them runs first, a binding never reads the new rows at a cell's old index: a change runs only the bindings of the
+  rows that changed and never shows a row with another row's data, not even for a moment in a memo. With keys, a row that stays keeps its cell and size wherever it
   moves, and rows removed or inserted before others leave the others alone. A cell past the end (the list shrank) disposes its content until the list binds it again.
   The header, footer and empty view are part of the view (their `CellSlot`s), outside the recycling; a separator
   goes into each row's cell, after the row (before it, inverted), while the row is not the last.
@@ -1151,6 +1157,9 @@ natural size and the items scroll past the room (`gpui-component`'s `PopupMenu` 
 items are: the item they move to is scrolled into view, and Page Up / Page Down go a viewport at a time
 (`crates/nsh-base/tests/base/menu.rs`).
 
+The internal scroll views and `MenuList` disable edge bounce and scroll bars; content that fits stays still,
+while overflowing items remain scrollable by pointer and keyboard.
+
 **Menu lists.** `MenuList` (Rust, `menu.rs`) puts a level's items in a virtualized list of the menu's own. The menu
 counts it as one place per row among the level's items, made or not, so its keys walk the rows by index: a row not
 made yet is scrolled to and focused once the list has made it, and a disabled row is passed over as an item is. A
@@ -1171,7 +1180,8 @@ core (`ElementRef::transition_time`, an `Action::TransitionTime` the commit answ
 `transition`, the app's `class`, `style` and theme included: the longest duration plus delay, two seconds at most),
 waits that long, then unmounts, and `onClose` follows. A generation counter keeps a stale frame or exit from acting on
 a newer change: opened again on its way out, the popup goes back to its look (its transitions run back) and was
-never gone, so neither `onClose` nor `onOpen` fires. On its way out it takes no keys either: the keyboard focus inside
+never gone, so neither `onClose` nor `onOpen` fires. A spring timing (`ease-spring-[k,c]`) runs its entrance and
+exit on a spring, whose settling time `transition_time` reports. On its way out it takes no keys either: the keyboard focus inside
 goes back to the trigger as it closes, not once it is gone (`PopupPresence::focus_back_on_close`, `Popover`'s and a
 desktop menu's; a dropdown's `Presence::back`, a combobox's to its input), unless the choice that closed it moved the
 focus out of the popup in the same turn (`ElementRef::focus_back` yields to a `focus()` outside the popup in its
@@ -1210,7 +1220,10 @@ element, and an action emits `select` with the app's id. On a desktop OS a press
 `popup_menu`; elsewhere the content opens nothing. A `ContextMenu` given `items` is the same kind of menu on iOS: the native component
 `nsh/context-menu` (`system_context_menu.rs`) shows the system's context menu from `MenuButton`'s item data, and
 `menu.rs` reports it with the drawn menu's events; elsewhere, and without items, the menu is the drawn one. `nsh/mobile`'s `SegmentedControl` is the same kind of native
-component, `nsh/segmented-control` (`system_segmented_control.rs`), built as `TabBar` is.
+component, `nsh/segmented-control` (`system_segmented_control.rs`), built as `TabBar` is; so is its `Switch`,
+`nsh/switch` (`system_switch.rs` on iOS, `SwitchComponent.java` on Android), and its `DateTimePicker`,
+`nsh/date-time-picker` (iOS `system_date_time_picker.rs`, Android `DateTimePickerComponent.java`): values cross to the
+platforms as their fields, never as strings to parse, and come back the same way.
 
 `HoverCard` (`hover_card.rs`) is `gpui-base`'s `HoverCard` on `Popover`'s overlay and presence. On the desktops the
 pointer is followed by Rust listeners, `onMouseEnter` / `onMouseLeave` on the `trigger` slot (the app's element) and on

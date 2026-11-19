@@ -78,7 +78,7 @@ use nsh_core::{
     SubmitBehavior, TextAlign,
     geometry::{Point, Size},
     tailwind::state,
-    text_edit::{key_of, pasted},
+    text_edit::{clip_chars, key_of, pasted},
 };
 use rustc_hash::FxHashMap;
 use windows::{
@@ -130,7 +130,7 @@ use windows::{
                 DefWindowProcW, GetCaretBlinkTime, KillTimer, SetTimer, WM_CHAR, WM_CLEAR, WM_COPY,
                 WM_CUT, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT,
                 WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-                WM_LBUTTONUP, WM_MOUSEMOVE,
+                WM_LBUTTONUP, WM_MOUSEMOVE, WS_VSCROLL,
             },
         },
     },
@@ -351,6 +351,56 @@ impl InputState {
         self.editor.as_ref().map_or((0, 0), Editor::selection)
     }
 
+    /// What of `text` may replace the selection: cut to what `maxLength`
+    /// (characters, Unicode scalar values) leaves room for.
+    fn fit<'a>(&self, text: &'a str) -> &'a str {
+        let Some(max) = self.config.borrow().max_length else {
+            return text;
+        };
+        let units = self.units();
+        let (a, b) = self.selection();
+        let start = (a.min(b) as usize).min(units.len());
+        let end = (a.max(b) as usize).min(units.len());
+        let kept = char_count(&units[..start]) + char_count(&units[end..]);
+        clip_chars(text, (max as usize).saturating_sub(kept))
+    }
+
+    /// RichEdit's limit (`TxGetMaxLength`) for `maxLength`. RichEdit counts
+    /// UTF-16 units, `maxLength` characters: the limit is the units the
+    /// text has plus one per character of room left, set again after each
+    /// edit, so what RichEdit inserts by itself (an input method's
+    /// composition and commit, the emoji panel, a drop) stays within
+    /// `maxLength` characters. A character of one unit leaves the limit as
+    /// it was; one of two (an emoji) raises it by one, though RichEdit
+    /// takes such a character by itself only while two characters of room
+    /// are left. The field's own insertions (typing, pastes, `insertText`)
+    /// cut their text by characters first ([`InputState::fit`]) and lift
+    /// the limit ([`uncut`]), so they fill the room exactly.
+    fn limit(&self) -> u32 {
+        let Some(max) = self.config.borrow().max_length else {
+            return i32::MAX as u32;
+        };
+        let units = self.units();
+        let room = (max as usize).saturating_sub(char_count(&units));
+        (units.len() + room).min(i32::MAX as usize) as u32
+    }
+
+    fn set_limit(&self, units: u32) {
+        if let Some(e) = &self.editor
+            && e.props().max_length != units
+        {
+            e.update(|p| p.max_length = units, TXTBIT_MAXLENGTHCHANGE);
+        }
+    }
+
+    /// Sets RichEdit's limit for the text it holds now
+    /// ([`InputState::limit`]).
+    fn follow_limit(&self) {
+        if self.config.borrow().max_length.is_some() {
+            self.set_limit(self.limit());
+        }
+    }
+
     /// The text being composed, while there is any.
     fn composed_text(&self) -> Option<String> {
         let (before, after) = self.composing.get()?;
@@ -365,6 +415,51 @@ impl InputState {
         if self.size.replace(size) != size {
             self.placeholder.borrow_mut().take();
         }
+    }
+
+    /// Several lines too narrow for a character: the rich editor's sink, a
+    /// point wide at its caret, which takes the typing and the input
+    /// methods of an editor that draws its own text. Wrapped, RichEdit
+    /// puts every character on a line of its own there, and input methods
+    /// open their candidates by what they compose, which would go down a
+    /// line with every character typed. Such a field keeps its text
+    /// unwrapped and its caret at its left edge
+    /// ([`InputState::keep_left`]).
+    fn narrow(&self) -> bool {
+        let width = self.size.get().0;
+        let config = self.config.borrow();
+        config.multiline && width > 0.0 && width < config.style.font_size.0
+    }
+
+    /// The property bits: the config's, unwrapped while the field is
+    /// narrow.
+    fn bits(&self) -> u32 {
+        let bits = base_bits(&self.config.borrow());
+        if self.narrow() {
+            bits & !TXTBIT_WORDWRAP
+        } else {
+            bits
+        }
+    }
+
+    /// A narrow field scrolls the start of what an input method composes,
+    /// else the caret, to its left edge, which is where the field is: a
+    /// composition starts there and runs on along the line, as in a field
+    /// of any width, whatever the input method places its candidates by
+    /// (the composition's start, its box or the caret). RichEdit scrolls
+    /// several lines sideways only when told to (no `ES_AUTOHSCROLL`), so
+    /// the composition stays put as it grows; it keeps the caret's line in
+    /// view itself.
+    fn keep_left(&self) {
+        if !self.narrow() {
+            return;
+        }
+        let Some(e) = &self.editor else { return };
+        let at = match self.composing.get() {
+            Some((before, _)) => before,
+            None => self.selection().1,
+        };
+        e.scroll_to_left_edge(at);
     }
 
     /// The text format of the config's font.
@@ -483,8 +578,7 @@ impl InputState {
 
     /// A multiline field's vertical scroll in pixels: where it is and the
     /// farthest it goes (the last line at the content box's bottom).
-    /// RichEdit keeps no scroll range without a scroll bar and scrolls on
-    /// past its text, so the end comes from the text's height.
+    /// Clamp the wheel to the text's height rather than scrolling past its end.
     fn text_scroll(&self) -> Option<(i32, i32)> {
         let e = self.editor.as_ref()?;
         let mut at = windows::Win32::Foundation::POINT::default();
@@ -535,13 +629,19 @@ impl InputState {
         self.update_client();
     }
 
-    /// Tells RichEdit its client rectangle if it changed.
+    /// Tells RichEdit its client rectangle if it changed, and whether the
+    /// text wraps, which changes as the field becomes narrow or stops
+    /// being narrow.
     fn update_client(&self) {
+        let Some(e) = &self.editor else { return };
         let client = self.client();
-        if let Some(e) = &self.editor
-            && e.props().client != client
-        {
+        if e.props().client != client {
             e.update(|p| p.client = client, TXTBIT_CLIENTRECTCHANGE);
+        }
+        let bits = self.bits();
+        if e.props().bits != bits {
+            e.update(|p| p.bits = bits, 0);
+            self.keep_left();
         }
     }
 
@@ -559,7 +659,8 @@ impl InputState {
         let style = &config.style;
         let color = self.anim_color.get().unwrap_or(style.color);
         let face = family(style.font_family.map(|f| f.name()).as_deref());
-        let bits = base_bits(&config);
+        let bits = self.bits();
+        let limit = self.limit();
         e.update(
             |p| {
                 let cf = &mut p.char_format;
@@ -608,12 +709,8 @@ impl InputState {
                     pf.dyLineSpacing = 0;
                 }
                 p.bits = bits;
-                p.max_length = config.max_length.unwrap_or(i32::MAX as u32);
-                p.scroll = if config.multiline {
-                    ES_AUTOVSCROLL
-                } else {
-                    ES_AUTOHSCROLL
-                };
+                p.max_length = limit;
+                p.scroll = scroll_flags(&config);
                 p.highlight = config
                     .selection_color
                     .map(|c| (colorref(c), colorref(color)));
@@ -714,10 +811,20 @@ impl InputState {
                 dc.SetTarget(&list);
                 dc.SetDpi(96.0 * s, 96.0 * s);
                 dc.BeginDraw();
-                // RichEdit maps its client rectangle through the target's
-                // DPI and draws in DIPs: only the origin comes back to the
-                // view's points (the scale is the DPI's already).
-                dc.SetTransform(&Matrix3x2::translation(-ox as f32 / s, -oy as f32 / s));
+                // RichEdit draws its client pixels in units of GDI's DPI,
+                // not the target's: scaled to the target's (nothing on a
+                // monitor at the system's scale), then the origin comes
+                // back to the view's points.
+                let k = Surface::by_key(self.surface)
+                    .map_or(1.0, |surface| richedit::target_scale(surface.hwnd(), s));
+                dc.SetTransform(&Matrix3x2 {
+                    M11: k,
+                    M12: 0.0,
+                    M21: 0.0,
+                    M22: k,
+                    M31: -ox as f32 / s,
+                    M32: -oy as f32 / s,
+                });
                 let drawn = e.draw(dc.as_raw(), bounds);
                 let ended = dc.EndDraw(None, None);
                 dc.SetTarget(None);
@@ -785,7 +892,19 @@ impl Hosted for InputState {
         // shows, the background is transparent), or its first caret keeps
         // the height of the default font. The recording is in the content
         // box's points, as this item draws.
-        if let Some(drawn) = &*self.drawn.borrow() {
+        // RichEdit takes the text color as a COLORREF, which has no alpha
+        // (`colorref`): it would draw a transparent or translucent color
+        // opaque. The color's alpha is applied to its drawing here instead,
+        // so a field whose text is transparent (`OtpInput`'s, over its
+        // cells) shows nothing of its text.
+        let text_alpha = alpha(color);
+        if text_alpha > 0.0
+            && let Some(drawn) = &*self.drawn.borrow()
+        {
+            let faded = text_alpha < 1.0;
+            if faded {
+                cx.push_opacity(text_alpha);
+            }
             // SAFETY: a COM call between BeginDraw and EndDraw.
             unsafe {
                 cx.dc.DrawImage(
@@ -795,6 +914,9 @@ impl Hosted for InputState {
                     D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
                     D2D1_COMPOSITE_MODE_SOURCE_OVER,
                 );
+            }
+            if faded {
+                cx.pop();
             }
         }
 
@@ -852,6 +974,11 @@ fn base_bits(config: &InputConfig) -> u32 {
     bits
 }
 
+/// The alpha of a color, 0 to 1: what [`colorref`] leaves out.
+fn alpha(c: Color) -> f32 {
+    (c.0 & 0xff) as f32 / 255.0
+}
+
 fn colorref(c: Color) -> COLORREF {
     let v = c.0;
     let (r, g, b) = ((v >> 24) & 0xff, (v >> 16) & 0xff, (v >> 8) & 0xff);
@@ -884,6 +1011,13 @@ fn family(name: Option<&str>) -> String {
         Some("ui-serif" | "serif") => "Times New Roman".to_owned(),
         Some(f) => f.to_owned(),
     }
+}
+
+fn scroll_flags(config: &InputConfig) -> u32 {
+    if !config.multiline {
+        return ES_AUTOHSCROLL;
+    }
+    ES_AUTOVSCROLL | WS_VSCROLL.0
 }
 
 /// The horizontal alignment of the text (0: left, 1: right).
@@ -1302,6 +1436,10 @@ fn process(surface: &Surface, view: &NshView, input: &InputState) -> bool {
     } else if notes.composition_start.is_some() {
         report_composition(surface, view, input);
     }
+    if notes.changed || notes.composition_end {
+        input.follow_limit();
+    }
+    input.keep_left();
     if notes.changed || notes.selection {
         input.wake_caret();
         report_selection(surface, view, input);
@@ -1313,11 +1451,32 @@ fn process(surface: &Surface, view: &NshView, input: &InputState) -> bool {
     changed
 }
 
-/// Replaces the selection with `text` (undo takes it back; `maxLength`
-/// clips it).
+/// Replaces the selection with `text`, cut to what `maxLength` leaves room
+/// for ([`InputState::fit`]); undo takes it back.
 fn replace_selection(input: &InputState, text: &str) {
-    let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
-    input.send(EM_REPLACESEL, 1, wide.as_ptr() as isize);
+    let wide: Vec<u16> = input.fit(text).encode_utf16().chain(Some(0)).collect();
+    uncut(input, || {
+        input.send(EM_REPLACESEL, 1, wide.as_ptr() as isize);
+    });
+}
+
+/// Runs `insert`, an insertion of text [`InputState::fit`] cut already, with
+/// RichEdit's limit lifted, so that its count of UTF-16 units does not cut
+/// it again; then sets the limit for the text it made.
+fn uncut(input: &InputState, insert: impl FnOnce()) {
+    if input.config.borrow().max_length.is_none() {
+        insert();
+        return;
+    }
+    input.set_limit(i32::MAX as u32);
+    insert();
+    input.set_limit(input.limit());
+}
+
+/// The characters (Unicode scalar values) of UTF-16 `units`; an unpaired
+/// surrogate counts as one.
+fn char_count(units: &[u16]) -> usize {
+    char::decode_utf16(units.iter().copied()).count()
 }
 
 /// Return submitted the input (`blur`: and unfocuses it).
@@ -1464,7 +1623,8 @@ fn set_value(view: &NshView, input: &InputState, text: &str, count: u32) {
     }
     let Some(e) = &input.editor else { return };
     input.programmatic.set(true);
-    e.set_text(text);
+    // The app's value is never cut to `maxLength`, as on every platform.
+    uncut(input, || e.set_text(text));
     input.send(EM_SETSEL, usize::MAX >> 1, -1);
     input.programmatic.set(false);
     input.reported_text.replace(input.text());
@@ -1583,12 +1743,15 @@ pub(crate) fn char_input(surface: &Rc<Surface>, text: &str) {
         return;
     }
     input.follow(&view);
-    for unit in text.encode_utf16() {
-        input.send(WM_CHAR, unit as usize, 1);
-    }
+    let fit = input.fit(&text);
+    uncut(&input, || {
+        for unit in fit.encode_utf16() {
+            input.send(WM_CHAR, unit as usize, 1);
+        }
+    });
     let changed = process(surface, &view, &input);
     if changed {
-        key_press(surface, &view, key_of(&text));
+        key_press(surface, &view, key_of(fit));
     }
 }
 
@@ -2155,6 +2318,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn multiline_scrollbars_have_native_overflow_ranges() {
+        for editable in [false, true] {
+            let config = InputConfig {
+                multiline: true,
+                editable,
+                ..Default::default()
+            };
+            let editor = Editor::new(
+                HWND::default(),
+                Props {
+                    client: RECT {
+                        right: 160,
+                        bottom: 80,
+                        ..Default::default()
+                    },
+                    bits: base_bits(&config),
+                    scroll: scroll_flags(&config),
+                    ..Default::default()
+                },
+                Box::new(|| {}),
+                Box::new(|| {}),
+            )
+            .expect("RichEdit");
+            let line =
+                "<entry name=\"a-long-xml-attribute-that-overflows-the-report-viewport\" />\r\n";
+            editor.set_text(&line.repeat(40));
+            editor.send(0x00BA, 0, 0); // EM_GETLINECOUNT forces text layout.
+            let (min, max, _, _) = editor.vscroll();
+            assert!(max - min > 80, "vertical overflow missing: {min}..{max}");
+        }
+    }
+
+    #[test]
     fn stop_and_destroy_forget_the_focus() {
         let surface = Surface::new(Default::default());
         FOCUS.with(|f| f.borrow_mut().entry(surface.key()).or_default().inactive = true);
@@ -2164,6 +2360,75 @@ mod tests {
         destroyed(&surface);
         assert!(FOCUS.with(|f| !f.borrow().contains_key(&surface.key())));
         assert!(window_active(&surface));
+    }
+
+    /// The rich editor's sink: a multiline input a point wide. However
+    /// much it holds, the caret stays at its top left, and what an input
+    /// method composes starts there and runs on along one line, where the
+    /// input method opens its candidates; a field of any other width wraps
+    /// as before.
+    #[test]
+    fn a_point_wide_input_keeps_a_composition_at_its_corner() {
+        let surface = Surface::new(Default::default());
+        let view = NshView::new(5, nsh_core::ViewKind::Input);
+        create(&surface, &view);
+        let input = input_of(&view).expect("input");
+        config(
+            &surface,
+            &view,
+            &InputConfig {
+                multiline: true,
+                ..Default::default()
+            },
+        );
+        let at = |w: f32| {
+            content(
+                &view,
+                Bounds::new(Point::default(), Size::new(Points(w), Points(16.0))),
+            );
+        };
+        at(1.0);
+        let e = input.editor.as_ref().expect("RichEdit");
+        assert_eq!(
+            e.props().bits & TXTBIT_WORDWRAP,
+            0,
+            "a point-wide input wraps"
+        );
+        let client = e.props().client;
+        let at_corner = |p: windows::Win32::Foundation::POINT| {
+            (p.x - client.left).abs() <= 1 && (p.y - client.top).abs() <= 1
+        };
+        let mut text = String::new();
+        for (count, c) in "你好世界，再见".chars().enumerate() {
+            text.push(c);
+            value(&view, &text, count as u32 + 1);
+            let caret = e.position(input.selection().1);
+            assert!(
+                at_corner(caret),
+                "after {text:?} the caret is at {caret:?}, the field at {client:?}"
+            );
+        }
+        // An input method composes at the caret (as Text Services Framework
+        // would, with no message of the field's).
+        let start = input.selection().1;
+        input.composing.set(Some((start, 0)));
+        for letter in ["n", "i", "h", "a", "o"] {
+            replace_selection(&input, letter);
+            process(&surface, &view, &input);
+            let (first, end) = (e.position(start), e.position(input.selection().1));
+            assert!(
+                at_corner(first),
+                "the composition starts at {first:?}, the field at {client:?}"
+            );
+            assert_eq!(end.y, first.y, "the composition goes on to another line");
+        }
+        input.composing.set(None);
+        at(200.0);
+        assert_ne!(
+            e.props().bits & TXTBIT_WORDWRAP,
+            0,
+            "a wide input does not wrap"
+        );
     }
 
     #[test]
@@ -2216,6 +2481,12 @@ mod tests {
             colorref(Color::rgba(0x11, 0x22, 0x33, 0xff)),
             COLORREF(0x332211)
         );
+        // A COLORREF has no alpha: transparent comes out black, so the
+        // drawing takes the alpha apart.
+        assert_eq!(colorref(Color::rgba(0, 0, 0, 0)), COLORREF(0));
+        assert_eq!(alpha(Color::rgba(0, 0, 0, 0)), 0.0);
+        assert_eq!(alpha(Color::rgba(0x11, 0x22, 0x33, 0xff)), 1.0);
+        assert!((alpha(Color::rgba(0, 0, 0, 0x80)) - 0.502).abs() < 0.001);
     }
 
     #[test]

@@ -8,8 +8,8 @@ import test from "node:test";
 
 const source = await readFile(new URL("nsh.js", import.meta.url), "utf8");
 // `Player` is not exported; the page only gets it from `createPlayer`.
-const { Player, keyCode, elementTag, runtimeSheet } = await import(
-  `data:text/javascript,${encodeURIComponent(`${source}\nexport { Player, keyCode, runtimeSheet };`)}`
+const { Player, keyCode, elementTag, runtimeSheet, charLength, clipChars } = await import(
+  `data:text/javascript,${encodeURIComponent(`${source}\nexport { Player, keyCode, runtimeSheet, charLength, clipChars };`)}`
 );
 
 /** A player on a fake engine; `sent` holds `[name, payload]` of the events it got. */
@@ -132,15 +132,73 @@ test("links the app shows no menu for keep the browser's context menu", () => {
   assert.equal(player.contextMenu(e), false);
 });
 
+test("maxLength counts characters and cuts between user-perceived characters", () => {
+  assert.equal(charLength("a😀𠀀"), 3);
+  assert.equal(clipChars("hello", 3), "hel");
+  assert.equal(clipChars("hello", 0), "");
+  assert.equal(clipChars("a😀b", 2), "a😀");
+  assert.equal(clipChars("😀".repeat(3), 2), "😀😀");
+  // A letter with its combining accent, an emoji with its skin tone, a
+  // family joined by zero-width joiners: whole or not at all.
+  assert.equal(clipChars("café", 4), "caf");
+  assert.equal(clipChars("ok👍🏽", 3), "ok");
+  assert.equal(clipChars("ok👍🏽", 4), "ok👍🏽");
+  assert.equal(clipChars("a👨‍👩‍👧b", 5), "a");
+});
+
+test("a field's maxlength lets in what fits by characters, an emoji counting once", () => {
+  const { player } = fakePlayer();
+  const field = {
+    tagName: "INPUT",
+    value: "",
+    classList: { toggle() {} },
+    getAttribute: () => null,
+    setAttribute() {},
+    removeAttribute(name) {
+      if (name === "maxlength") delete this.maxLength;
+    },
+  };
+  const el = { _field: field, getAttribute: () => null };
+  player.view = () => el;
+  player.op_in(["in", 1, { multiline: false, maxLength: 10 }, null]);
+  assert.equal(field.maxLength, 10);
+  // 800 emoji in a 1500 limit: room for 700 more characters, 1600 + 700 units.
+  player.op_in(["in", 1, { multiline: false, maxLength: 1500 }, null]);
+  field.value = "😀".repeat(800);
+  player.fieldLimit(field);
+  assert.equal(field.maxLength, 2300);
+  // Before a paste at the end: exactly what fits by characters.
+  field.selectionStart = field.selectionEnd = field.value.length;
+  const paste = (text) => ({ inputType: "insertFromPaste", data: null, dataTransfer: { getData: () => text } });
+  player.beforeInput(field, paste("😀".repeat(800)));
+  assert.equal(field.maxLength, 3000, "700 emoji more");
+  player.beforeInput(field, paste("ab👍🏽"));
+  assert.equal(field.maxLength, 1600 + "ab👍🏽".length);
+  // Typing over a selected emoji frees one character's room.
+  field.value = "😀".repeat(1500);
+  field.selectionStart = 0;
+  field.selectionEnd = 2;
+  player.beforeInput(field, { inputType: "insertText", data: "ab" });
+  assert.equal(field.maxLength, 2998 + 1, "only the a");
+  // A composition is held to the room left, one unit per character.
+  field.selectionStart = field.selectionEnd = 3000;
+  player.beforeInput(field, { inputType: "insertCompositionText", data: "中" });
+  assert.equal(field.maxLength, 3000);
+  // No maxLength, no limit.
+  player.op_in(["in", 1, { multiline: false }, null]);
+  assert.equal(field.maxLength, undefined);
+});
+
 test("input autofill hints are set, changed and cleared on both field kinds", () => {
   const { player } = fakePlayer();
   const attrs = new Map();
   const field = {
     classList: { toggle() {} },
+    getAttribute: (name) => attrs.get(name) ?? null,
     setAttribute: (name, value) => attrs.set(name, value),
     removeAttribute: (name) => attrs.delete(name),
   };
-  const el = { _field: field, removeAttribute() {} };
+  const el = { _field: field, getAttribute: () => null };
   player.view = () => el;
   for (const multiline of [false, true]) {
     field.tagName = multiline ? "TEXTAREA" : "INPUT";
@@ -164,10 +222,11 @@ test("input autoCorrect sets spellcheck and the autocorrect attribute on both fi
   const attrs = new Map();
   const field = {
     classList: { toggle() {} },
+    getAttribute: (name) => attrs.get(name) ?? null,
     setAttribute: (name, value) => attrs.set(name, value),
     removeAttribute: (name) => attrs.delete(name),
   };
-  const el = { _field: field, removeAttribute() {} };
+  const el = { _field: field, getAttribute: () => null };
   player.view = () => el;
   for (const multiline of [false, true]) {
     field.tagName = multiline ? "TEXTAREA" : "INPUT";
@@ -183,12 +242,58 @@ test("input autoCorrect sets spellcheck and the autocorrect attribute on both fi
   }
 });
 
+test("view and field ARIA write only changed attributes", () => {
+  const { player } = fakePlayer();
+  const element = () => {
+    const attrs = new Map();
+    const writes = [];
+    return {
+      attrs,
+      writes,
+      getAttribute: (name) => attrs.get(name) ?? null,
+      setAttribute(name, value) {
+        writes.push(["set", name, value]);
+        attrs.set(name, value);
+      },
+      removeAttribute(name) {
+        writes.push(["remove", name]);
+        attrs.delete(name);
+      },
+    };
+  };
+  const el = element();
+  player.updateAria(el);
+  assert.deepEqual(el.writes, []);
+
+  // A label can arrive before the field, which then takes it from the view.
+  el._props = { label: "Price" };
+  player.updateAria(el);
+  assert.deepEqual(el.writes.splice(0), [["set", "aria-label", "Price"]]);
+  const field = element();
+  el._field = field;
+  player.fieldAria(el, field);
+  assert.deepEqual(el.writes.splice(0), [["remove", "aria-label"]]);
+  assert.deepEqual(field.writes.splice(0), [["set", "aria-label", "Price"]]);
+
+  player.updateAria(el);
+  assert.deepEqual(el.writes, []);
+  assert.deepEqual(field.writes, []);
+  el._props = {};
+  player.updateAria(el);
+  assert.deepEqual(field.writes.splice(0), [["remove", "aria-label"]]);
+  assert.equal(field.attrs.has("aria-label"), false);
+  player.updateAria(el);
+  assert.deepEqual(el.writes, []);
+  assert.deepEqual(field.writes, []);
+});
+
 test("an invalid view is aria-invalid, and so is the field of an input", () => {
   const { player } = fakePlayer();
   const element = () => {
     const attrs = new Map();
     return {
       attrs,
+      getAttribute: (name) => attrs.get(name) ?? null,
       setAttribute: (name, value) => attrs.set(name, value),
       removeAttribute: (name) => attrs.delete(name),
     };
@@ -221,6 +326,7 @@ for (const multiline of [false, true]) {
         const attrs = new Map();
         return {
           attrs, style: {}, classList: { toggle() {} },
+          getAttribute: (name) => attrs.get(name) ?? null,
           setAttribute: (name, value) => attrs.set(name, value),
           removeAttribute: (name) => attrs.delete(name),
         };
@@ -295,6 +401,7 @@ test("a combo box's field names its highlighted row and its list by DOM id", () 
     return {
       attrs,
       id: "",
+      getAttribute: (name) => attrs.get(name) ?? null,
       setAttribute: (name, value) => attrs.set(name, value),
       removeAttribute: (name) => attrs.delete(name),
       ...extra,
@@ -348,6 +455,7 @@ test("a field names the line describing it by DOM id, followed as it comes and g
     return {
       attrs,
       id: "",
+      getAttribute: (name) => attrs.get(name) ?? null,
       setAttribute: (name, value) => attrs.set(name, value),
       removeAttribute: (name) => attrs.delete(name),
       ...extra,
@@ -685,6 +793,65 @@ test("Tab stops are the pressables and the focusable views, pressable or not", (
   assert.equal(chart.hasAttribute("tabindex"), false);
   assert.equal(chart.blurred, true);
   delete globalThis.document;
+});
+
+test("a view laid out at no size, as in a display none subtree, is no Tab stop, nor is its field", () => {
+  const { player } = fakePlayer();
+  player.updateAria = () => {};
+  player.placeFrame = () => {};
+  player.readingChanged = () => {};
+  player.caretMoved = () => {};
+  globalThis.document = { activeElement: null };
+  try {
+    const classes = () => ({ toggle() {}, remove() {} });
+    const stop = (el) => (el.hasAttribute("tabindex") ? el.tabIndex : null);
+    const button = Object.assign(focusView(true, {}), { classList: classes() });
+    const field = Object.assign(focusView(false, {}), { classList: classes(), style: {} });
+    const input = Object.assign(focusView(false, {}), { classList: classes(), _field: field });
+    const views = new Map([[2, button], [4, input]]);
+    player.view = (id) => views.get(id);
+    // Its props come before its first frame: a stop until the frame says.
+    player.updateFocusable(button);
+    assert.equal(stop(button), 0);
+    player.op_f([0, 2, 0, 0, 120, 32]);
+    assert.equal(stop(button), 0, "shown");
+    player.op_f([0, 4, 0, 40, 120, 32]);
+    player.op_ic([0, 4, 8, 4, 104, 24]);
+    assert.equal(stop(field), null, "a shown field keeps the browser's Tab stop");
+    // Hidden with the focus on it: no stop, and it gives the focus up.
+    document.activeElement = button;
+    player.op_f([0, 2, 0, 0, 0, 0]);
+    assert.equal(stop(button), null, "hidden");
+    assert.equal(button.blurred, true);
+    document.activeElement = field;
+    player.op_f([0, 4, 0, 0, 0, 0]);
+    player.op_ic([0, 4, 0, 0, 0, 0]);
+    assert.equal(stop(field), -1, "a hidden field");
+    assert.equal(field.blurred, true);
+    // Shown again: stops again.
+    player.op_f([0, 2, 0, 0, 120, 32]);
+    assert.equal(stop(button), 0);
+    player.op_f([0, 4, 0, 40, 120, 32]);
+    player.op_ic([0, 4, 8, 4, 104, 24]);
+    assert.equal(stop(field), null);
+    // A link is a stop without a `tabindex`: hidden, it gets -1 instead.
+    const link = Object.assign(focusView(true, {}), { classList: classes(), tagName: "A", matches: () => true });
+    views.set(6, link);
+    player.updateFocusable(link);
+    player.op_f([0, 6, 0, 0, 120, 32]);
+    assert.equal(stop(link), 0);
+    player.op_f([0, 6, 0, 0, 0, 0]);
+    assert.equal(stop(link), -1, "a hidden link");
+    player.op_f([0, 6, 0, 0, 120, 32]);
+    assert.equal(stop(link), 0);
+    // A field whose view is mounted hidden, before any content box.
+    const late = Object.assign(focusView(false, {}), { classList: classes(), _frame: [0, 0, 0, 0] });
+    late._field = field;
+    player.fieldStop(late);
+    assert.equal(stop(field), -1);
+  } finally {
+    delete globalThis.document;
+  }
 });
 
 test("setAccessibilityFocus leaves the keyboard focus in a field the user is typing in", async () => {
@@ -1450,6 +1617,54 @@ test("a paused WebSocket holds its events, in order, until the engine resumes it
   }
 });
 
+test("another tab's changes to the app's storage reach the engine as this tab now reads them", () => {
+  const { player } = fakePlayer();
+  const text = (p, l) => new TextDecoder().decode(new Uint8Array(player.wasm.memory.buffer, p, l));
+  const got = [];
+  player.wasm.nsh_storage_changed = (pp, pl, kp, kl, vp, vl, kind) => {
+    got.push([text(pp, pl), text(kp, kl), text(vp, vl), kind]);
+    return -1;
+  };
+  const listeners = new Set();
+  const kept = new Map();
+  const area = { getItem: (key) => kept.get(key) ?? null };
+  const saved = { window: globalThis.window, localStorage: globalThis.localStorage };
+  globalThis.window = {
+    addEventListener: (type, f) => type === "storage" && listeners.add(f),
+    removeEventListener: (type, f) => type === "storage" && listeners.delete(f),
+  };
+  globalThis.localStorage = area;
+  const dispatch = (event) => listeners.forEach((f) => f({ storageArea: area, ...event }));
+  try {
+    player.followStorage("nsh:app:");
+    player.followStorage("nsh:app:");
+    assert.equal(listeners.size, 1, "one listener however many loads");
+    // This tab wrote "mine" after the other tab's "theirs": it keeps its own.
+    kept.set("nsh:app:draft", "mine");
+    dispatch({ key: "nsh:app:draft", newValue: "theirs" });
+    kept.delete("nsh:app:gone");
+    dispatch({ key: "nsh:app:gone", newValue: null });
+    // Other apps' keys, the page's own and `sessionStorage` are not the app's.
+    dispatch({ key: "nsh:other:draft", newValue: "x" });
+    dispatch({ key: "draft", newValue: "x" });
+    dispatch({ key: "nsh:app:draft", newValue: "x", storageArea: {} });
+    dispatch({ key: null, newValue: null });
+    assert.deepEqual(got, [
+      ["nsh:app:", "draft", "mine", 1],
+      ["nsh:app:", "gone", "", 0],
+      ["nsh:app:", "", "", 2],
+    ]);
+    // A stopped app follows nothing until the next one loads its storage.
+    globalThis.cancelAnimationFrame ??= () => {};
+    player.stop();
+    assert.equal(listeners.size, 0);
+    assert.equal(player.storagePrefixes.size, 0);
+  } finally {
+    clearTimeout(player.timer);
+    Object.assign(globalThis, saved);
+  }
+});
+
 test("a plain Shader uploads the whole built-ins block, progress and overflow at 0", () => {
   const { player } = fakePlayer();
   const uploads = [];
@@ -2179,10 +2394,11 @@ function animating(t) {
     else player.requestFrame();
     return -1;
   };
-  const frame = () => {
+  // The page's animation frame, which began at `at` (now by default).
+  const frame = (at = clock.now) => {
     const due = frames;
     frames = [];
-    for (const f of due) f(clock.now);
+    for (const f of due) f(at);
   };
   // Time passes by `ms`: the timers due run, and what the calls into the
   // engine left for after them (`deadlineSoon`).
@@ -2192,7 +2408,7 @@ function animating(t) {
     t.mock.timers.tick(ms);
     await null;
   };
-  return { player, ticks, frame, pass, ended: () => ended };
+  return { player, ticks, frame, pass, clock, ended: () => ended };
 }
 
 test("a native animation ends on time while no animation frames come", async (t) => {
@@ -2223,6 +2439,33 @@ test("while animation frames come the page runs no frames of its own", async (t)
   assert.equal(ticks.length, frames, "every frame the browser's");
   await pass(1000);
   assert.equal(ticks.length, frames);
+});
+
+test("a frame a task held steps the animations when its callbacks run", (t) => {
+  const { player, ticks, frame, clock } = animating(t);
+  player.requestFrame();
+  // The frame began at 0; a press handled before its callbacks took
+  // 170 ms (it opened a sheet, whose entrance asks for this frame).
+  clock.now = 170;
+  frame(0);
+  assert.deepEqual(ticks, [170], "the entrance starts when it was asked for, not 170 ms in");
+  // The next frames are on time: their own times keep the display's pace.
+  clock.now = 189;
+  frame(186.7);
+  clock.now = 205;
+  frame(203.3);
+  assert.deepEqual(ticks, [170, 186.7, 203.3]);
+});
+
+test("an animation frame never steps earlier than the one before", (t) => {
+  const { player, ticks, frame, clock } = animating(t);
+  player.requestFrame();
+  clock.now = 170;
+  frame(0);
+  // On time by its own measure, but begun before the held one ran.
+  clock.now = 172;
+  frame(160);
+  assert.deepEqual(ticks, [170, 170]);
 });
 
 test("a dialog comes in and reports it shown without animation frames", () => {
@@ -3440,9 +3683,10 @@ function leavingPage() {
       preventDefault() { this.defaultPrevented = true; },
     });
   const hide = (persisted = false) => dispatch("pagehide", { persisted });
+  const show = (persisted = false) => dispatch("pageshow", { persisted });
   const guards = () => (listeners.get("beforeunload") ?? []).length;
   const watchers = () => (listeners.get("pagehide") ?? []).length;
-  return { leave, hide, guards, watchers, restore: () => Object.assign(globalThis, saved) };
+  return { leave, hide, show, guards, watchers, restore: () => Object.assign(globalThis, saved) };
 }
 
 /** A running app (it watches the page's end, as `begin` has it) that
@@ -3545,6 +3789,45 @@ test("a page kept in the back / forward cache keeps its app running", () => {
     page.hide();
     assert.equal(calls.quits, 1);
   } finally {
+    page.restore();
+  }
+});
+
+test("a page in the back / forward cache is in the background until it comes back", () => {
+  const page = leavingPage();
+  const document = globalThis.document;
+  // A browser that tells no `visibilitychange` around the cache: the page
+  // stays visible and focused throughout.
+  globalThis.document = { visibilityState: "visible", hasFocus: () => true };
+  try {
+    const { player, calls } = quittingPlayer(() => true);
+    const reported = [];
+    Object.assign(player, { reported: "{}", environment: () => ({ lifecycle: player.lifecycle() }) });
+    player.wasm.nsh_environment = (ptr, len) => {
+      reported.push(JSON.parse(new TextDecoder().decode(new Uint8Array(player.wasm.memory.buffer, ptr, len))).lifecycle);
+      return -1;
+    };
+    player.watchPageCache(() => player.environmentChanged());
+    page.show();
+    page.hide(true);
+    assert.deepEqual(reported, ["background"], "kept in the cache: the app goes to the background");
+    assert.equal(calls.quits, 0, "and runs on");
+    page.show(true);
+    assert.deepEqual(reported, ["background", "active"], "restored: back in the foreground");
+    // Hidden again: the cache and visibility are one background.
+    page.hide(true);
+    globalThis.document.visibilityState = "hidden";
+    page.show(true);
+    assert.deepEqual(reported, ["background", "active", "background"]);
+    globalThis.document.visibilityState = "visible";
+    player.environmentChanged();
+    // The page's real end ends the app, once, with no lifecycle edge.
+    page.hide();
+    page.hide();
+    assert.equal(calls.quits, 1);
+    assert.deepEqual(reported, ["background", "active", "background", "active"]);
+  } finally {
+    globalThis.document = document;
     page.restore();
   }
 });

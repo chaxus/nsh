@@ -231,6 +231,48 @@ fn open_notes() {
 }
 ```
 
+## Signing in on the web
+
+`open_auth_session` opens a provider's sign-in page (an OAuth authorization URL) and
+answers with the callback URL it redirects to: iOS shows it in an
+`ASWebAuthenticationSession` sheet (`.ephemeral(true)` keeps it apart from the user's
+Safari data), Android in a Custom Tab, other platforms in the system browser. Outside
+iOS the callback comes back as a link of a scheme the app claims (`nsh.json`
+`schemes`); the session takes it, so `next_url_scheme_open` never hears it. The
+answer is `Completed(url)` or `Cancelled` (the user closed the page or came back to
+the app without signing in); a session with nothing to bring its callback back fails
+with `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM`. The page's URL needs the `openUrl`
+capability, as `open_url` does.
+
+When the app learns the user signed in some other way while the page still shows (a
+device code approved on a page that never redirects back), `close_auth_session()`
+closes it: the session answers `Cancelled`, and iOS and Android take the page away and
+bring the app back. A page in a desktop browser stays open. With no session waiting,
+it does nothing.
+
+```rust
+use nsh_core::{
+    auth_session::{AuthSessionOutcome, AuthSessionRequest},
+    prelude::*,
+};
+
+fn sign_in(authorize_url: String) {
+    let session = open_auth_session(AuthSessionRequest::new(authorize_url, "myapp"));
+    spawn(async move {
+        match session.await {
+            Ok(AuthSessionOutcome::Completed(callback)) => log::info!("signed in: {callback}"),
+            Ok(_) => {} // Cancelled.
+            Err(error) => log::warn!("no sign-in page: {error}"),
+        }
+    });
+}
+```
+
+In tests, `Headless::on_auth_session` gives the platform an in-app session and ends
+each one with the outcome given, and `keep_auth_sessions_open` leaves each one open
+until the app closes it (`screen().auth_session_showing()`); without either the page
+is in `opened_urls()` and `open_with_url` delivers the callback.
+
 ## Extending a Rust app with TSX
 
 The crate's `#[native_module("app/native")]` function names what TSX may import: components

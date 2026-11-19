@@ -14,8 +14,8 @@ use std::{
 
 use nsh_core::{
     AccessibilityRole, AccessibilityState, Bounds, Command, Dialog, EventKind, EventMask,
-    GestureValues, InputConfig, KeyCapture, MountBatch, MountItem, NodeId, PanActivation, Point,
-    PointerEvents, Points, Size, ViewKind,
+    GestureValues, InputConfig, KeyCapture, ModalConfig, ModalPresentation, MountBatch, MountItem,
+    NodeId, PanActivation, Point, PointerEvents, Points, SheetDetent, Size, ViewKind,
     element::{ClipboardItem, PropEnum},
     keymap::Keystroke,
 };
@@ -74,6 +74,61 @@ fn utf16_slice(text: &str, start: u32, end: u32) -> String {
         .collect()
 }
 
+/// A dialog presented as an iOS sheet with detents: what the platform
+/// shows of it.
+#[derive(Debug, Clone, PartialEq)]
+struct SheetState {
+    /// `detents`.
+    detents: Vec<SheetDetent>,
+    /// The detent it rests at; `None` for the smallest.
+    resting: Option<SheetDetent>,
+    /// The app's `detent` it was last given, which moves it when it
+    /// changes.
+    app: Option<SheetDetent>,
+    /// `grabber`.
+    grabber: bool,
+}
+
+impl SheetState {
+    /// What a sheet that was `old` shows once given `config`, as iOS
+    /// applies it: it opens at `detent`, else `defaultDetent`, else the
+    /// smallest; later the app's `detent` moves it when it changes, and a
+    /// detent no longer among `detents` leaves it at the smallest. `None`
+    /// for a dialog that is no sheet or has no detents.
+    fn configured(old: Option<Self>, config: &ModalConfig) -> Option<Self> {
+        if config.presentation == ModalPresentation::FullScreen || config.detents.is_empty() {
+            return None;
+        }
+        let resting = match &old {
+            None => config.detent.or(config.default_detent),
+            Some(old) if old.app != config.detent && config.detent.is_some() => config.detent,
+            Some(old) => old.resting,
+        };
+        Some(Self {
+            resting: resting.filter(|d| config.detents.contains(d)),
+            detents: config.detents.clone(),
+            app: config.detent,
+            grabber: config.grabber,
+        })
+    }
+
+    /// The detent it rests at, on a screen `screen` tall.
+    fn resting(&self, screen: Points) -> Option<SheetDetent> {
+        self.resting.or_else(|| {
+            let height = |d: &SheetDetent| match *d {
+                SheetDetent::Medium => screen.0 * 0.5,
+                SheetDetent::Large => screen.0,
+                SheetDetent::Height(height) => height.0.min(screen.0),
+                SheetDetent::Fraction(fraction) => screen.0 * fraction.0.clamp(0.0, 1.0),
+            };
+            self.detents
+                .iter()
+                .copied()
+                .min_by(|a, b| height(a).total_cmp(&height(b)))
+        })
+    }
+}
+
 /// What a back does ([`Screen::back_target`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Back {
@@ -121,6 +176,8 @@ pub struct Screen {
     /// The dialogs shown, in order, and how many were answered.
     dialogs: Vec<Dialog>,
     answered: usize,
+    /// The dialogs the app closed itself (`DialogCloser::close`), by id.
+    closed_dialogs: HashSet<u32>,
     /// The item on the clipboard: its text, and the HTML written with it
     /// (`Clipboard.write`).
     clipboard: Option<ClipboardItem>,
@@ -146,6 +203,13 @@ pub struct Screen {
     shares: Vec<nsh_core::share::ShareSheet>,
     /// The shares to answer.
     share_answers: Vec<u32>,
+    /// The web sign-in sessions the app opened in the app, in order.
+    auth_sessions: Vec<nsh_core::auth_session::AuthSessionPage>,
+    /// The sign-in sessions to answer.
+    auth_session_answers: Vec<u32>,
+    /// The sign-in session showing: not answered, closed by the app nor
+    /// replaced yet.
+    auth_session_showing: Option<u32>,
     /// The requests on local paths that reached the platform
     /// (`pick_paths`, `open_path`, ...), in order.
     file_requests: Vec<nsh_core::file_dialog::FileRequest>,
@@ -197,6 +261,41 @@ pub struct Screen {
     main_hidden: bool,
     /// The id the next canvas node gets.
     next_canvas_node: NodeId,
+    /// The bar the platform draws over its stacks' screens (iOS, Android),
+    /// whose header items the model places as it does; `None` where NSH
+    /// lays a page's header out itself.
+    system_bar: Option<SystemBar>,
+    /// The header items of each screen under a system bar, from its
+    /// options.
+    headers: HashMap<NodeId, ScreenHeader>,
+}
+
+/// The header bar iOS and Android draw over a stack's screens: they place
+/// the header items the core sized in it ([`Screen::set_system_bar`]).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SystemBar {
+    /// The bar's height, and with a large title's row below it (the
+    /// engine's `header_heights`).
+    pub(crate) heights: (Points, Points),
+    /// Android's toolbar, which starts the title after the leading items;
+    /// else iOS's navigation bar, which centers it.
+    pub(crate) toolbar: bool,
+}
+
+/// The header items of a screen under a system bar, and what places them.
+#[derive(Debug, Clone, Copy)]
+struct ScreenHeader {
+    left: Option<NodeId>,
+    right: Option<NodeId>,
+    title: Option<NodeId>,
+    /// The header's height, the system UI above the bar included (none
+    /// when the header is hidden).
+    height: Points,
+    large_title: bool,
+    back_visible: bool,
+    /// How many trailing system buttons (`ios.headerRightItems`) stand at
+    /// the bar's end.
+    right_items: usize,
 }
 
 #[derive(Debug, Default)]
@@ -214,6 +313,8 @@ struct View {
     prevent_back: bool,
     /// A modal the user's back closes natively (`ModalConfig::close_on_escape`).
     close_on_escape: bool,
+    /// A dialog presented as a sheet with detents, as iOS shows it.
+    sheet: Option<SheetState>,
     /// Its `role`.
     role: AccessibilityRole,
     /// It takes no presses (`disabled`, its accessibility state).
@@ -466,6 +567,7 @@ impl Screen {
         for item in &batch.items {
             self.apply_item(item);
         }
+        self.place_headers();
         self.auto_focus();
     }
 
@@ -548,6 +650,7 @@ impl Screen {
                 self.detach(*id);
                 self.nodes.remove(id);
                 self.children.remove(id);
+                self.headers.remove(id);
                 self.popped.remove(id);
                 self.closed.remove(id);
                 self.forget_window(*id);
@@ -563,9 +666,25 @@ impl Screen {
             },
             MountItem::ScreenConfig { id, config } => {
                 self.nodes.entry(*id).or_default().prevent_back = config.prevent_back;
+                if self.system_bar.is_some() {
+                    self.headers.insert(
+                        *id,
+                        ScreenHeader {
+                            left: config.left,
+                            right: config.right,
+                            title: config.title_view,
+                            height: config.header_height,
+                            large_title: config.large_title,
+                            back_visible: config.back_visible,
+                            right_items: config.right_items.len(),
+                        },
+                    );
+                }
             }
             MountItem::ModalConfig { id, config } => {
-                self.nodes.entry(*id).or_default().close_on_escape = config.close_on_escape;
+                let view = self.nodes.entry(*id).or_default();
+                view.close_on_escape = config.close_on_escape;
+                view.sheet = SheetState::configured(view.sheet.take(), config);
             }
             MountItem::Frame { id, frame } => {
                 self.nodes.entry(*id).or_default().frame = *frame;
@@ -734,6 +853,9 @@ impl Screen {
     fn command(&mut self, id: NodeId, command: &Command) {
         match command {
             Command::Dialog(dialog) => self.dialogs.push((**dialog).clone()),
+            Command::CloseDialog(dialog) => {
+                self.closed_dialogs.insert(*dialog);
+            }
             Command::SetClipboard(text) => self.set_clipboard(Some(text.clone())),
             Command::SetClipboardItem(item) => self.clipboard = Some(item.clone()),
             // An image replaces the text.
@@ -767,6 +889,13 @@ impl Screen {
                 self.shares.push((**sheet).clone());
                 self.share_answers.push(*id);
             }
+            // Recorded, never shown: a test's machine signs in nowhere.
+            Command::AuthSession { id, page } => {
+                self.auth_sessions.push((**page).clone());
+                self.auth_session_answers.push(*id);
+                self.auth_session_showing = Some(*id);
+            }
+            Command::CloseAuthSession(id) => self.auth_session_ended(*id),
             // Recorded, never carried out: a test's machine opens, shows
             // and trashes nothing.
             Command::FileRequest { id, request } => {
@@ -1301,6 +1430,112 @@ impl Screen {
         self.viewport = Some(size);
     }
 
+    /// The platform draws `bar` over its stacks' screens and places their
+    /// header items in it (iOS, Android).
+    pub(crate) fn set_system_bar(&mut self, bar: SystemBar) {
+        self.system_bar = Some(bar);
+    }
+
+    /// Places the header items of the screens under a system bar, as the
+    /// platform does: the core lays each one out on its own, at the origin,
+    /// and leaves where it goes in the bar to the platform.
+    fn place_headers(&mut self) {
+        let Some(bar) = self.system_bar else {
+            return;
+        };
+        let screens: Vec<NodeId> = self.headers.keys().copied().collect();
+        for screen in screens {
+            self.place_header(bar, screen);
+        }
+    }
+
+    /// Places the header items of `screen` in `bar`, side by side in the
+    /// middle of its row: the leading one at its start (after the back
+    /// button on Android, instead of it on iOS, as the core budgets the
+    /// title's room), the trailing one at its end, the title centered on
+    /// iOS between them, and on Android right after the leading ones.
+    fn place_header(&mut self, bar: SystemBar, screen: NodeId) {
+        /// iOS's bar: its inset at either end and after an item, its back
+        /// button (inset included) and one of its buttons (the core's
+        /// `title_room`).
+        const INSET: f32 = 16.0;
+        const BACK: f32 = 56.0;
+        const BUTTON: f32 = 48.0;
+        /// Android's toolbar: where its content starts without and with the
+        /// up arrow, and the margin after its trailing item.
+        const START: f32 = 16.0;
+        const START_AFTER_UP: f32 = 72.0;
+        const END: f32 = 12.0;
+        let Some(header) = self.headers.get(&screen).copied() else {
+            return;
+        };
+        let Some(view) = self.nodes.get(&screen) else {
+            return;
+        };
+        let width = view.frame.size.width.0;
+        // Not its stack's first screen: the bar leads with a back button.
+        let back = header.back_visible
+            && view
+                .parent
+                .is_some_and(|stack| self.screens(stack).first() != Some(&screen));
+        let size = |id: Option<NodeId>| {
+            let id = id?;
+            Some((id, self.nodes.get(&id)?.frame.size))
+        };
+        let (left, title, right) = (size(header.left), size(header.title), size(header.right));
+        let mut places = Vec::with_capacity(3);
+        if bar.toolbar {
+            let mut leading = if back { START_AFTER_UP } else { START };
+            if let Some((id, size)) = left {
+                places.push((id, leading, size));
+                leading += size.width.0;
+            }
+            if let Some((id, size)) = title {
+                places.push((id, leading, size));
+            }
+            if let Some((id, size)) = right {
+                places.push((id, width - END - size.width.0, size));
+            }
+        } else {
+            let leading = match left {
+                Some((id, size)) => {
+                    places.push((id, INSET, size));
+                    INSET + size.width.0 + INSET
+                }
+                None if back => INSET + BACK,
+                None => INSET,
+            };
+            let trailing = match right {
+                Some((id, size)) => {
+                    let x = width - INSET - size.width.0;
+                    places.push((id, x, size));
+                    x - INSET
+                }
+                None => width - INSET - header.right_items as f32 * BUTTON,
+            };
+            if let Some((id, size)) = title {
+                let w = size.width.0;
+                let x = ((width - w) / 2.0).min(trailing - w).max(leading);
+                places.push((id, x, size));
+            }
+        }
+        // The bar's row: the top of the header, below the system UI (a
+        // large title's row is under it). A hidden header has no height:
+        // its row is above the screen.
+        let row = if header.large_title {
+            bar.heights.1
+        } else {
+            bar.heights.0
+        };
+        let top = header.height.0 - row.0;
+        for (id, x, size) in places {
+            if let Some(item) = self.nodes.get_mut(&id) {
+                let y = top + (bar.heights.0.0 - size.height.0) / 2.0;
+                item.frame.origin = Point::new(Points(x), Points(y));
+            }
+        }
+    }
+
     /// The screens stack `id` shows, bottom to top (without those a back
     /// popped).
     fn screens(&self, id: NodeId) -> Vec<NodeId> {
@@ -1519,14 +1754,28 @@ impl Screen {
         &self.dialogs
     }
 
-    /// The oldest dialog not answered yet.
+    /// Whether the app closed the dialog with this id itself
+    /// (`DialogCloser::close`): it is no longer up, and no step answers it.
+    pub fn dialog_closed(&self, id: u32) -> bool {
+        self.closed_dialogs.contains(&id)
+    }
+
+    /// Where the oldest dialog neither answered nor closed is.
+    fn pending_dialog_at(&self) -> Option<usize> {
+        (self.answered..self.dialogs.len())
+            .find(|&at| !self.closed_dialogs.contains(&self.dialogs[at].id))
+    }
+
+    /// The oldest dialog neither answered nor closed yet.
     pub(crate) fn pending_dialog(&self) -> Option<&Dialog> {
-        self.dialogs.get(self.answered)
+        self.pending_dialog_at().map(|at| &self.dialogs[at])
     }
 
     /// The oldest dialog was answered.
     pub(crate) fn answered(&mut self) {
-        self.answered = (self.answered + 1).min(self.dialogs.len());
+        self.answered = self
+            .pending_dialog_at()
+            .map_or(self.dialogs.len(), |at| at + 1);
     }
 
     /// The picks the app asked for so far, in order (`Picker.pickImages`,
@@ -1620,6 +1869,35 @@ impl Screen {
     /// [`nsh_core::platform::Environment::share`]).
     pub fn shares(&self) -> &[nsh_core::share::ShareSheet] {
         &self.shares
+    }
+
+    /// The web sign-in sessions the app opened in the app
+    /// ([`nsh_core::element::open_auth_session`]), in order: those that
+    /// reached the platform, past the request's checks (only once the
+    /// environment has [`nsh_core::platform::Environment::auth_session`];
+    /// elsewhere the page is in [`Screen::opened_urls`]).
+    pub fn auth_sessions(&self) -> &[nsh_core::auth_session::AuthSessionPage] {
+        &self.auth_sessions
+    }
+
+    /// Whether a sign-in session the app opened in the app still shows:
+    /// the user has not ended it (as
+    /// [`crate::Headless::keep_auth_sessions_open`] leaves it), and the app
+    /// has not closed it ([`nsh_core::element::close_auth_session`]).
+    pub fn auth_session_showing(&self) -> bool {
+        self.auth_session_showing.is_some()
+    }
+
+    /// Sign-in session `id` is no longer showing.
+    pub(crate) fn auth_session_ended(&mut self, id: u32) {
+        if self.auth_session_showing == Some(id) {
+            self.auth_session_showing = None;
+        }
+    }
+
+    /// The sign-in sessions to answer since the last call.
+    pub(crate) fn take_auth_session_answers(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.auth_session_answers)
     }
 
     /// The share requests to answer since the last call.
@@ -1896,6 +2174,49 @@ impl Screen {
         }
     }
 
+    /// The detent the dialog `selector` names rests at as an iOS sheet
+    /// with `detents` (`presentation` `"pageSheet"` / `"formSheet"`): the
+    /// app's `detent`, else `defaultDetent`, else the smallest, until the
+    /// user moves it ([`crate::Headless::set_sheet_detent`]); `None` for a
+    /// dialog that is no such sheet. An error when none or several match.
+    pub fn sheet_detent(&self, selector: &str) -> Result<Option<SheetDetent>, String> {
+        let id = self.id(selector)?;
+        let screen = self.viewport.map_or(Points(0.0), |size| size.height);
+        Ok(self
+            .nodes
+            .get(&id)
+            .and_then(|v| v.sheet.as_ref())
+            .and_then(|sheet| sheet.resting(screen)))
+    }
+
+    /// Whether the dialog `selector` names shows the system's grabber as an
+    /// iOS sheet with `detents`. An error when none or several match.
+    pub fn sheet_grabber(&self, selector: &str) -> Result<bool, String> {
+        let id = self.id(selector)?;
+        Ok(self
+            .nodes
+            .get(&id)
+            .and_then(|v| v.sheet.as_ref())
+            .is_some_and(|sheet| sheet.grabber))
+    }
+
+    /// The user moved the sheet `id` to `detent`, one of its `detents`.
+    pub(crate) fn move_sheet(&mut self, id: NodeId, detent: SheetDetent) -> Result<(), String> {
+        let sheet = self
+            .nodes
+            .get_mut(&id)
+            .and_then(|v| v.sheet.as_mut())
+            .ok_or("not a dialog presented as a sheet with detents")?;
+        if !sheet.detents.contains(&detent) {
+            return Err(format!(
+                "{detent:?} is not one of the sheet's detents {:?}",
+                sheet.detents
+            ));
+        }
+        sheet.resting = Some(detent);
+        Ok(())
+    }
+
     /// The id of the one view `selector` names: what
     /// [`Screen::active_descendant`] and [`Screen::accessibility_controls`]
     /// give; an error when none or several match.
@@ -2104,7 +2425,7 @@ impl Screen {
     /// Whether a pointer can reach `id`: neither it nor a view around it
     /// has `pointerEvents: none` or is hidden, and no view around it takes
     /// touches only for itself (`box-only`).
-    fn receives_pointer(&self, id: NodeId) -> bool {
+    pub(crate) fn receives_pointer(&self, id: NodeId) -> bool {
         let mut at = Some(id);
         while let Some(current) = at {
             let Some(view) = self.nodes.get(&current) else {
@@ -2125,7 +2446,7 @@ impl Screen {
     /// root) reaches in that window: the topmost, innermost one there that
     /// receives touches. Canvas nodes are not views, and the windows of the
     /// app's own are windows of their own.
-    fn hit_pointer(&self, at: Point<Points>, window: NodeId) -> NodeId {
+    pub(crate) fn hit_pointer(&self, at: Point<Points>, window: NodeId) -> NodeId {
         let order = self.attached();
         let attached: HashSet<NodeId> = order.iter().copied().collect();
         // The dialogs presented over this window first, the last one on
@@ -2717,19 +3038,20 @@ impl Screen {
 
     /// Input `id`'s caret at the end of its text, in the view, as
     /// [`nsh_core::ApproxTextEngine`] lays the text out: characters `0.55 ×`
-    /// the font size wide, lines `1.2 ×` it tall, wrapped at the content
-    /// box's width when multiline; a single line is centered in the box and
-    /// keeps the caret inside it. A multiline input taller in text than its
-    /// box scrolls it to keep the caret's line in view, as the platforms'
-    /// do while the user edits: the line at the bottom of the box.
+    /// the font size wide, lines as tall as the style's `lineHeight` (or
+    /// `1.2 ×` font size by default), wrapped at the content box's width when
+    /// multiline; a single line is centered in the box and keeps the caret
+    /// inside it. A multiline input taller in text than its box scrolls it to
+    /// keep the caret's line in view, as the platforms' do while the user
+    /// edits: the line at the bottom of the box.
     pub(crate) fn input_caret(&self, id: NodeId) -> Option<Bounds<Points>> {
         let view = self.nodes.get(&id)?;
         let input = view.input.as_ref()?;
         let content = input
             .content
             .unwrap_or_else(|| Bounds::new(Point::default(), view.frame.size));
-        let font = input.config.style.font_size.0;
-        let (advance, line) = (font * 0.55, font * 1.2);
+        let font = input.config.style.font_size.0.max(1.0);
+        let (advance, line) = (font * 0.55, input.config.style.approx_line_height().0);
         let (column, row) = if input.config.multiline {
             let per_line = ((content.size.width.0 / advance).floor() as usize).max(1);
             let mut row = 0;
@@ -3361,6 +3683,17 @@ mod tests {
         // A line break starts a line.
         screen.input_mut(2).unwrap().text = "ab\nc".into();
         assert_eq!(caret(&screen), (4.0 + 5.5, 18.0, 12.0));
+
+        // Explicit `lineHeight` moves subsequent lines and sizes the caret to it.
+        let mut spaced = nsh_core::InputConfig::default();
+        spaced.style.font_size = Points(10.0);
+        spaced.style.line_height = Points(24.0);
+        spaced.multiline = true;
+        screen.apply(&batch(vec![MountItem::Input {
+            id: 2,
+            config: Box::new(spaced),
+        }]));
+        assert_eq!(caret(&screen), (4.0 + 5.5, 6.0 + 24.0, 24.0));
     }
 
     #[test]

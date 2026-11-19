@@ -16,7 +16,7 @@ Every tag is a component in scope (`native-pipeline.md`): the primitives `View`,
 | `<Input>` | UITextField / UITextView in a container | `value` / `defaultValue` / `onChange` (`{ value }`) / `onSubmit` / `onFocus` / `onBlur`, `placeholder` (its color: the `placeholderColor` style key, `placeholder:text-*`), `masked`, `keyboardType` (React Native's values: `number-pad` digits only, `decimal-pad`, `numeric` = iOS's decimal pad / Android's signed decimal, `numbers-and-punctuation` = iOS's numbers and punctuation / Android's signed decimal, `email-address`, `phone-pad`, `url`), `ios={{ keyboardAppearance }}` (`default` / `light` / `dark`; Android's keyboards follow the system theme), `returnKeyType`, `autoCapitalize`, `autoCorrect`, `multiline`, `maxLength`, `readonly`, `autoFocus`, the `selectionColor` style key (`selection:text-*`), `submitBehavior` (`submit` / `blurAndSubmit` / `newline`, resolved with `multiline` by `InputConfig::submit()`, which is all platforms read; a multiline input that submits takes no line break from return, but does from Shift / Option / Alt+Return on hardware keyboards, and a return that commits an IME composition never submits), `selectedRange` + `onSelectionChange` (UTF-16 `start` / `end`), `onCaretMove` (where the caret is: `bounds` in the input, `pageBounds` in the root view; "Caret" below), `onPaste` + `pasteBehavior` (what was pasted, and whether the input inserts its text; "Paste" below), `onKeyPress` (`key`: the text, `Backspace`, `Enter`), `onCompositionChange` (`composing`, `text`: an input method's composition as it starts, changes and ends, its end after the `onChange` of the committed text; each platform tracks the composition natively and holds a `value` the app sets during one until it ends, since setting the text would end it and commit the text being composed), `autoComplete` (autofill; `ios={{ textContentType }}` for iOS's names), `caret` (`false` hides the caret), `onContentSizeChange` (the value's size, for growing inputs: reported by the core after any layout that follows a change of the text or the content width, one empty line's for an empty input though it is sized by its placeholder); ref `setSelection(start, end)`, `insertText(text)` |
 | `<NavStack>` / `<NavPage>` | UINavigationController | `createNavStack(routes)`: `push` / `pop` / `popToRoot` / `replace` / `setRoutes` / `remove`; pages keep their state while stacked; on iOS and Android the system header (content below the header UIKit shows: the platform measures it, `Core::set_screen_header`; `title`, `headerLeft` / `headerRight` / `headerTitle` elements, `headerTransparent`, `headerVisible`, `headerBackVisible`, `headerLargeTitle`, `headerBackTitle`, colors from `headerStyle` / `headerClass`, in Rust `header_style_with(|s| ..)`: typed styles in `headerClass`'s place); on the desktops and the web the page's `header` slot (the app's element, which the core places at the top of the page, full width, with the content below it; NSH draws nothing else there); swipe back (`popOnSwipe`: the interactive gesture only); `statusBar` (below); `popOnBack={false}` keeps the user on a page (no swipe; the back buttons and keys send `onBackPress` instead of popping); `onBackPress` is sent on every back press while the app listens; `onDismiss` after the user popped it |
 | `<SplitView>` | UISplitViewController | `nsh/base`'s, a Rust component: `sidebar`, `content` (optional: three columns), `detail` slots, each a `NavStack`; `columnVisibility` (`"automatic"` / `"all"` / `"doubleColumn"` / `"detailOnly"`) with `onColumnVisibilityChange({ columnVisibility })`, controlled (what the user shows and the app does not take is shown again, `automatic` aside). On iOS and Mac Catalyst a native component (`SPLIT_VIEW_COMPONENT`) whose columns are the stacks' `UINavigationController`s, collapsed into one compact stack of their pages where the window is horizontally compact; elsewhere a dock area (the sidebar its left dock) of fixed widths, one column at a time where the window is horizontally compact (`horizontalSizeClass()`); see [dock.md](dock.md) "SplitView" |
-| `<Dialog>` | presented UIViewController | `open` (default true), `animation`, `onOpen`, `onClose`, `onCancel` (every close attempt), `onOpenChange({ open, reason })` (`"cancel"` / `"backdropPress"` / `"swipe"`); `closeOnEscape` / `closeOnBackdropPress` / `closeOnSwipe` (default true; iOS sheets swipe away, Escape and Android back close natively, then `onCancel` + `onOpenChange({ open: false, reason })` + `onClose`; the renderer keeps a removed dialog's `onClose` until the platform reports it, `dom.rs` `dismissed`); `class` / `style` style the popup (the view holding the children), `backdropClass` / `backdropStyle` add a backdrop part behind it (none otherwise) whose presses are close attempts; `presentation` (iOS: `fullScreen` over a clear background, `pageSheet` / `formSheet` keep the system's sheet background; ignored on Android, the desktops and the web, where a dialog is a transparent layer over the whole window); `statusBar` (below); `ios={{ supportedOrientations }}`, `android={{ statusBarTranslucent }}` (otherwise the content starts below the status bar) |
+| `<Dialog>` | presented UIViewController | `open` (default true), `animation`, `onOpen`, `onClose`, `onCancel` (every close attempt), `onOpenChange({ open, reason })` (`"cancel"` / `"backdropPress"` / `"swipe"`); `closeOnEscape` / `closeOnBackdropPress` / `closeOnSwipe` (default true; iOS sheets swipe away, Escape and Android back close natively, then `onCancel` + `onOpenChange({ open: false, reason })` + `onClose`; the renderer keeps a removed dialog's `onClose` until the platform reports it, `dom.rs` `dismissed`); `class` / `style` style the popup (the view holding the children), `backdropClass` / `backdropStyle` add a backdrop part behind it (none otherwise) whose presses are close attempts; `presentation` (iOS: `fullScreen` over a clear background, `pageSheet` / `formSheet` keep the system's sheet background; ignored on Android, the desktops and the web, where a dialog is a transparent layer over the whole window); `detents` / `detent` / `defaultDetent` / `grabber` / `largestUndimmedDetent` / `onDetentChange({ detent })` (iOS sheets: the sheet presentation controller's detents and grabber, the core's `SheetDetent` that `Sheet` shares; ignored elsewhere, where `Sheet` is the app's sheet); a `NavStack` inside a dialog is the dialog controller's child navigation controller; `statusBar` (below); `ios={{ supportedOrientations }}`, `android={{ statusBarTranslucent }}` (otherwise the content starts below the status bar) |
 | `<Overlay>` | a `NshView` in the root view (the surface's, or the dialog's around it) | its children on top of that root view, outside the parent's layout and clipping; `anchor` (a ref, `{ x, y }` or `{ origin, size }`), `placement`, `align`, `offset`, `margin`, `onPosition`, `onPressOutside`, `onCancel` ("Overlays" below) |
 | `<InputAccessoryView>` | a NshView set as `inputAccessoryView` | `nativeID`; inputs name it with `ios={{ inputAccessoryViewID }}`. A layout root as wide as the window and as tall as its content; the core resolves the id (`InputConfig::accessory`). Renders nothing on Android |
 | `<WebView>` | WKWebView (WebKit loaded on first use) | `src` (a URL) or `html` (inline HTML, shown instead of `src`) + `baseUrl`, `injectedJavaScript(BeforeContentLoaded)`, `onMessage` (pages call `window.nsh.postMessage`), `onLoad*`, `onNavigationStateChange`, `onDownload` (iOS/macOS's `WKDownload`, WebKitGTK's session downloads or WebView2's `DownloadStarting` into the app's data directory's `downloads/<id>/`, only with a listener; a Rust `onDownloadPending` listener chooses destinations instead), `incognito` (website data of its own, in memory: each platform makes the web view from its first props, and the core keeps the prop from changing afterwards), Rust's `url_scheme(scheme, handler)` (URL schemes the page loads from the app, `nsh_core::web_resource`: the handler is called on the main thread with a request answered once, from any thread; read when the web view is made, as `incognito`; iOS and macOS `WKURLSchemeHandler` in `nsh-platform-apple`, Linux `webkit_web_context_register_uri_scheme`); ref: `reload()`, `goBack()`, `goForward()`, `postMessage(data)`, `injectJavaScript(js)`, `load({ src, headers })` (headers on the document request only: `NSMutableURLRequest` + `loadRequest`) |
@@ -283,7 +283,22 @@ misses the deadline is not waited for again until it catches up (`docs/dev/macos
   between inputs and the views `focusable` or presses make stops (`Mounter.updateFocusable`, `TabOrder` in
   `nsh-platform-android`), and at its first and last stop Tab and Shift+Tab go to the embedding Android host
   instead of wrapping. Android's Tab walks the native view tree (a portaled overlay is reached where it is
-  inserted, not by `ViewProps::tab_after`).
+  inserted, not by `ViewProps::tab_after`). While no view of the app has the focus, the window's own root holds it
+  (`NshView`, or a dialog's container): at launch, and from the first key after a tap. A tap clears a focus that is
+  not focusable in touch mode and leaves the window without one; the root's touch-mode listener takes the focus
+  again as the next key leaves touch mode (`pitfalls.md`). Android's directional search from the root takes only
+  views past its edge, and a standalone app's `NshView` and a dialog's container fill their window, so it finds
+  nothing. An arrow key with no modifier that nothing in the app took (no shortcut; a `captureKeys` rule takes a key
+  only where a view hears it, and while nothing has the focus none does, #2362) and that Android has nowhere else to
+  take then moves the focus into the app (`ArrowEntry`, `KeyDispatch.elsewhere`): an embedded `NshView`'s host
+  keeps an arrow when Android's search from `NshView` (`focusSearch`) finds a host view in its direction or a host
+  scroll view around it scrolls that way. The focus goes to the first stop on screen, whatever the arrow's
+  direction, or the first stop when none is on screen (`Mounter.enterFocus`), leaving touch mode as Tab does; the
+  app hears that stop's `onFocus`. The press is consumed, and its release too, unless the arrow is held until it
+  repeats: the repeats then move the focus Android's way and the release is Android's. Starting on screen keeps a
+  scrolled page where it is, near what Android's own default focus picks (`ViewRootImpl`'s `restoreDefaultFocus`:
+  the first focusable in tree order, in a scroll view the first one below its scrolled top that is on screen); from
+  there Android's directional navigation moves the focus. Enter and the D-pad centre keep Android's default.
   A shown overlay's content is in the Tab order where the app put the overlay, not where its native view is (at the
   end of its root view), as WAI-ARIA's non-modal popups have it: a popover's content right after its trigger, so
   Shift+Tab from it goes back to the trigger and Tab past its last stop goes on to what follows the popover. A list
@@ -308,8 +323,13 @@ misses the deadline is not waited for again until it catches up (`docs/dev/macos
   `focusVisible` and treats it as keyboard focus whatever its heuristics say after a click (`focusPressable`), the
   headless driver moves its focus (`focus_calls`); on a view that is not a stop it does nothing. Linux grabs the
   stop's widget (`key_focus::focus`), Android requests the native focus on a managed stop
-  (`Mounter.focusManaged`, focusable in touch mode for that session). Windows and GPUI leave `focus()` on views to
-  them; iOS focuses inputs only.
+  (`Mounter.focusManaged`, focusable in touch mode for that session), and keeps a request for a view not shown yet (a
+  page in the batch that pushes it or under its transition shader, a dialog's content before its window shows) until
+  it is, giving it up if the view is still not shown 3 s later: the latest request wins; a `blur()` of it, of a view
+  holding it, or `Keyboard.dismiss()`, any focus taken meanwhile (in hosted native content or the embedding app's
+  views too) or the view's removal end it; a request dropped without effect logs a warning (`PendingFocus`; an input
+  waits for its field on its own, `InputBox.focus`, and reports the wait, so the same rules end it). Windows and GPUI
+  leave `focus()` on views to them; iOS focuses inputs only.
 - **`onPanEnd` / `onPanStart`** carry `value` (`{ x?, y? }`, the axes `pan` binds): the bound pan values at that moment (a drag may grab a value mid
   animation), for snapping.
 - **Imperative calls**: nodes have `focus()`, `blur()` (inputs, and views that take presses where they are stops of
@@ -355,9 +375,11 @@ misses the deadline is not waited for again until it catches up (`docs/dev/macos
   listens, with the path of listening nodes (`EventPayload::Touch`, sent to the root; moves are merged per engine turn).
   Each touch carries `pointerType`, `pressure` and `tiltX` / `tiltY` as the DOM's `PointerEvent` (`TouchPoint`): iOS
   reads `UITouch` force and the Pencil's angles, Android `MotionEvent` pressure, tool type and tilt, Windows
-  `GetPointerPenInfo` / `GetPointerTouchInfo`, macOS and GTK a tablet's pen events, the web `PointerEvent`; a device
-  without pressure reports 0.5 while down and 0 once lifted. The
-  negotiation runs as in React Native, natively (`nsh-js` `touch.rs`), asking the app's handlers. A grant returning true
+  `GetPointerPenInfo` / `GetPointerTouchInfo`, macOS and GTK a tablet's pen events, and the web `PointerEvent`. A device
+  without pressure reports 0.5 while down and 0 once lifted. On web, `browser/events.rs` sends these fields in each point
+  from Wasm. `web/browser/gesture.js`, bundled into the realm's `bootstrap.js`, copies them to the event and the points
+  in `touches` and `changedTouches`. The negotiation asks the app's handlers as in React Native (`nsh-js` `touch.rs`
+  on native targets, `gesture.js` on web). A grant returning true
   (PanResponder's default) sends `SetJsResponder`: scroll
   views around stop taking the touches (UIKit: their pan recognizer is disabled; Android: `ScrollBox.jsBlocked`), and the
   presses of the views around it end with no long press or press after them (UIKit: their `PressRecognizer`s are
@@ -429,7 +451,18 @@ misses the deadline is not waited for again until it catches up (`docs/dev/macos
   element's own `accessibilityDescription`, so every platform reads it where it reads a description; the web also
   sets `aria-describedby` on the focused element. Views without a label read their texts. The props go as one `MountItem::ViewProps`, except
   a label changing alone on mounted props (one that follows app state: a count, a price), which goes as
-  `MountItem::AccessibilityLabel`. The `increment` / `decrement` actions make an element adjustable whatever its
+  `MountItem::AccessibilityLabel`. Android tells TalkBack when new props change what a mounted view's node says,
+  as its own widgets do (`A11y.changed`, the choice in `A11yChanges`): a new state description (mixed, expanded,
+  current, a value's text, invalid, with them the checked word) is a content change of that type, sent on every API
+  level (before 30 the description is the node's extras entry androidx reads); a checked or pressed change or a
+  gained selection of the view TalkBack just clicked (double tap), with the focus on it or an ancestor, is a click,
+  from which TalkBack reads the node's new state; a change of the focused view's numeric range is a state
+  description change on API 30+ and a selection before (at most one every 200 ms); anything else is a content
+  change that only refreshes the node (a change the app makes by itself to a plain checked or selected state, and a
+  tab selected without the focus, are silent, as there is nothing TalkBack reads for them). A first mount, an
+  unchanged update, a hidden element and a view not shown send nothing; a list cell recycled for another row may
+  send one, as its props change.
+  The `increment` / `decrement` actions make an element adjustable whatever its
   role: iOS adds the adjustable trait to the traits of its role (`native_view.rs` `traits`), so VoiceOver's swipe up /
   down performs them (an `image`, `Plot`'s role, stays an image), Android offers scroll forward / backward, Windows
   makes its range value writable.
@@ -590,7 +623,8 @@ misses the deadline is not waited for again until it catches up (`docs/dev/macos
   paste's own handler, on the user's paste only, and only when the app listens. Whether the input inserts the text is
   answered at once from `pasteBehavior` (`InputConfig::paste_behavior`: `"insert"`, the default, or `"report"`);
   images and files are never inserted. Inserted text is clipped to what `maxLength` leaves room for, as a browser's
-  `maxlength` clips it (iOS cuts between composed character sequences, the other platforms between code points). The event comes before the `onChangeText` of the text it inserts (Linux:
+  `maxlength` clips it. `maxLength` counts characters (Unicode scalar values, Rust's `char`) on every platform, and a
+  cut falls between user-perceived characters (`text_edit::clip_chars`): an emoji counts once and is never split. The event comes before the `onChangeText` of the text it inserts (Linux:
   maybe after, as GTK's own paste and NSH's read of the clipboard are both asynchronous; with `"report"` nothing is
   inserted, so it comes first). An app that decides per paste uses `"report"` and inserts what it allows with the
   ref's `insertText` (`Command::InsertText`): the text in place of the selection as the user's edit, `maxLength`
@@ -649,7 +683,8 @@ dialog around it (`Modal`). It is the one mechanism popups are built on (`nsh/ba
   (`nsh_core::overlay::place`): `placement` (`"top"`, `"bottom"` (default), `"left"`, `"right"`), on the other
   side when only that one has room, the side with more room when neither has; `align` along it (`"start"`,
   `"center"` (default), `"end"`; start and end follow the direction above and below); `offset` from the anchor; then
-  moved along the side to stay inside the root view's safe area less `margin`. An anchored overlay is laid out in
+  moved along the side to stay inside the root view's safe area less `margin` (or, for the main root view's overlays,
+  the area the platform shows them in, `Core::set_overlay_area`: the web's `overlays: "viewport"`, the window). An anchored overlay is laid out in
   that area rather than the whole root view, so content wider than it (a paragraph) wraps within it; in a terminal,
   within that area less the frame drawn a Cell outside its box. A side placement (`"left"`, `"right"`) is laid out in
   the whole area too: the side's room is the `available` of `onPosition`, which an overlay follows to fit it. Rust's

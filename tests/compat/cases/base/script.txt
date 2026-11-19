@@ -41,9 +41,14 @@ tap text:Sheet
 expect Sheet: pending
 tap text:Empty
 expect Empty: rejected TypeError
+tap text:Prompt
+expect Prompt: pending
+tap text:Input in sheet
+expect Input in sheet: rejected TypeError
 wait 300
 expect Alert: pending
 expect Sheet: pending
+expect Prompt: pending
 covers [nsh/base] AlertDialog
 # base-avatar
 tap id:case-base-avatar
@@ -189,6 +194,15 @@ expect Mouse: move 6.5,1 page 288 left down out -2,0
 listens id:hover onContextMenu
 event id:hover onContextMenu position.x=5 position.y=7 pointerType=mouse
 expect Mouse: menu at 5,294
+# `busy`: screen readers say its action is running, following a signal;
+# presses still count.
+prop id:save accessibilityState {}
+tap text:Save
+expect Saves: 1
+prop id:save accessibilityState busy=true
+tap text:Saving…
+expect Saves: 2
+prop id:save accessibilityState {}
 covers [nsh/base] Button
 covers [props] hitSlop
 covers [props] role
@@ -199,6 +213,7 @@ covers [events] onPressDown
 covers [events] onPressUp
 covers [events] onPress
 covers [props] Button.selected
+covers [props] Button.busy
 covers [props] selectedStyle
 # base-link
 tap id:case-base-link
@@ -331,6 +346,16 @@ expect Swipes dialog
 event text:"Swipes dialog" onCancel reason=swipe
 expect Log: swipes change false swipe
 absent Swipes dialog
+# An iOS sheet at detents: the user's moves heard
+# (`onDetentChange({ detent })`).
+tap text:Clear log
+tap text:Open sheet
+expect Sheet dialog
+prop id:sheet presentation pageSheet
+event text:"Sheet dialog" onDetentChange detent=large
+expect Log: sheet detent large
+event text:"Sheet dialog" onCancel reason=swipe
+absent Sheet dialog
 covers [nsh/base] Dialog
 covers [props] presentation
 covers [props] animation
@@ -346,6 +371,7 @@ covers [events] Dialog.onOpen
 covers [events] Dialog.onClose
 covers [events] Dialog.onCancel
 covers [events] Dialog.onOpenChange
+covers [events] onDetentChange
 # base-dialog-backdrop
 tap id:case-base-dialog-backdrop
 expect Styled dialog
@@ -388,6 +414,8 @@ prop id:first title First title
 prop id:first headerVisible true
 prop id:first headerLargeTitle false
 prop id:first headerTransparent false
+prop id:first headerShadowVisible true
+prop id:first headerBackgroundOnScroll false
 prop id:first headerBackVisible true
 noprop id:first headerBackTitle
 prop id:first popOnSwipe true
@@ -405,6 +433,8 @@ prop id:second title Second title
 prop id:second headerVisible false
 prop id:second headerLargeTitle true
 prop id:second headerTransparent true
+prop id:second headerShadowVisible false
+prop id:second headerBackgroundOnScroll true
 prop id:second headerBackTitle Back to second
 prop id:second headerBackVisible false
 prop id:second popOnSwipe false
@@ -455,6 +485,8 @@ covers [props] title
 covers [props] headerVisible
 covers [props] headerLargeTitle
 covers [props] headerTransparent
+covers [props] headerShadowVisible
+covers [props] headerBackgroundOnScroll
 covers [props] headerBackTitle
 covers [props] headerBackVisible
 covers [props] popOnSwipe
@@ -655,6 +687,8 @@ prop scroll:text:"let a = 1;" scrollbar false
 # The table's scroll view without its indicator.
 prop scroll:text:"Alpha" horizontal true
 prop scroll:text:"Alpha" scrollbar false
+# The table's grid, around its cells, styled by `tableGrid`.
+style parent:parent:text:"Alpha" backgroundColor #00ff00ff
 style text:"First item" color #0000ffff
 # A press on the link reports its URL and the modifier keys held;
 # nothing opens it.
@@ -998,16 +1032,15 @@ wait 1000
 animated parent:text:DetentBody transform.1 0
 tap below:parent:text:DetentBody
 absent DetentBody
-covers [props] Sheet.detents
-covers [props] Sheet.detent
-covers [props] Sheet.grabber
+covers [props] detents
+covers [props] detent
+covers [props] grabber
 covers [props] Sheet.grabberClass
 covers [props] Sheet.grabberStyle
 covers [props] Sheet.grabberAccessibilityLabel
 covers [props] Sheet.footer
 covers [props] Sheet.footerClass
 covers [props] Sheet.footerStyle
-covers [events] Sheet.onDetentChange
 # Detents of points and of a share of the screen: the largest (half the
 # screen) is the panel's height, and `defaultDetent` the first rest.
 tap text:OpenCustomSheet
@@ -1017,7 +1050,7 @@ frame parent:text:CustomBody 0 422 390 422
 animated parent:text:CustomBody transform.1 0
 tap below:parent:text:CustomBody
 absent CustomBody
-covers [props] Sheet.defaultDetent
+covers [props] defaultDetent
 # `closeOnBackdropPress={false}`: its backdrop keeps it.
 tap below:parent:text:StuckSheet
 expect StuckSheet
@@ -1767,15 +1800,16 @@ frame id:region 0 20 390 54
 frame id:details 0 0 390 30
 frame id:after 0 74 390 20
 # Closed: the frames at once, the details out once the region has closed:
-# the app's spring (stiffness 620, damping 36) settles in about 384 ms,
-# so they are still there after 300 (the default's would have gone at
-# about 265).
+# the app's spring (stiffness 64, damping 16, critically damped) settles
+# in about 1154 ms, so they are still there after 700 (the default's
+# would have gone at about 265) and gone after 1600. The margins stay
+# wide so a loaded machine's late timers cannot blur them.
 tap id:trigger
 frame id:region 0 20 390 24
 frame id:after 0 44 390 20
-wait 300
+wait 700
 frame id:details 0 0 390 30
-wait 100
+wait 900
 absent Details
 covers [props] Collapsible.reveal
 covers [props] Collapsible.revealSpring
@@ -1834,15 +1868,16 @@ listens id:details-a onPress
 tap id:details-b
 expect Taps b: 1
 # The open item's trigger closes it; the revealed panel springs shut on
-# the app's spring (settling in about 384 ms, the default in about 265)
-# and its content leaves once it has.
+# the app's spring (stiffness 64, damping 16: settling in about 1154 ms,
+# the default in about 265) and its content leaves once it has, with
+# wide margins on both sides.
 tap text:Returns
 expect Open: none
 frame id:item-b 0 20 390 20
 frame id:faq 0 20 390 60
-wait 300
+wait 700
 frame id:details-b 0 0 390 30
-wait 100
+wait 900
 absent Returns details
 # With `multiple`, opening one leaves the others open.
 tap id:multiple
@@ -4743,3 +4778,13 @@ tap id:content-size-narrow
 expect Width: true
 covers [events] onContentSizeChange
 covers [nsh/base] createRichEditor
+
+# base-dock-tab-scroll
+# The tabs do not fit the bar: they are in a scroll view as wide as the
+# bar, and the tab the ref displays stays the displayed one.
+tap id:case-base-dock-tab-scroll
+expect Strip a*
+expect Strip h
+frame scroll:id:strip-tab-a 0 0 390 24
+tap id:strip-show-h
+expect Strip h*

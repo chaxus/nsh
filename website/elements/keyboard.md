@@ -217,6 +217,9 @@ shortcuts use `on_key` / `on_key_with`; text editing uses `Input`, and terminal 
 | `repeat` | An auto-repeat of a held key. |
 | `defaultPrevented` | The mounted `captureKeys` policy decided this transition: the platform runs no native default and types no text. It is this transition's decision, observable as the DOM's `defaultPrevented` is, not a veto a listener casts. |
 
+On Linux, common media, volume and browser keys use UI Events names such as `"MediaPlayPause"`, `"AudioVolumeUp"` and
+`"BrowserBack"`.
+
 Both listeners return nothing. One platform event on the focused view bubbles to the enabled listening ancestors
 within the same native window, once each, for `onKeyDown` and `onKeyUp` alike. A real release the source reports
 reaches the focused view even when its press went elsewhere, as the DOM's does; losing the window's focus clears
@@ -273,7 +276,9 @@ events have none either. Android reports `key` from the character the hardware k
 DOM name) and `code` only from a real scan code, so a synthetic `adb shell input keyevent` has `""`. A system key
 (Back, Home, volume, media, camera, call) is never captured, even by `captureKeys="all"`, and still reaches listeners.
 A `focusable` view takes the hardware keyboard's focus; Tab and Shift+Tab move between the stops and go to the
-embedding Android host at the first and last one. See `docs/dev/tooling.md` and each platform's development page
+embedding Android host at the first and last one, and while no view has the focus the first arrow key moves it to the
+first stop on screen. A `keymap` binding on that arrow keeps the key for the app, as does a `captureKeys` rule of a
+view that hears it. See `docs/dev/tooling.md` and each platform's development page
 for what its source reports.
 
 On iOS, a hardware keyboard reports `UIKey.characters` as `key` (its case and layout kept) and maps

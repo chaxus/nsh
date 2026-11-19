@@ -8,11 +8,21 @@
 // the system's segmented control on iOS: its segments (`items`, each
 // `{ title, icon, disabled }`), the selected one (`selectedIndex`), which
 // the app sets, `disabled`, and `onChange` with the index the user chose.
+// `Switch`, the system's switch on iOS and Android: `checked`, which the
+// app sets, `disabled`, `accessibilityLabel`, `onChange` with the value the
+// user asked for, and the `accentColor` style it is on in.
+// `DateTimePicker`, the system's date and time picker
+// on iOS and Android: what it picks (`mode`), its value and bounds (`value`,
+// `min`, `max`: ISO strings in the mode's form), `minuteInterval`,
+// `disabled`, `accessibilityLabel`, and `onChange({ value })` with the
+// user's pick.
 import { Text, View, signal } from "nsh";
-import { SegmentedControl, TabBar, isAvailable } from "nsh/mobile";
+import { DateTimePicker, SegmentedControl, Switch, TabBar, isAvailable } from "nsh/mobile";
 
 function App() {
   const selected = signal(0);
+  const wifi = signal(true);
+  const when = signal("2026-11-17T09:30");
   const items = signal([
     { title: "Records", icon: "list.bullet" },
     { title: "Stats", icon: "chart.bar", badge: "3" },
@@ -31,6 +41,28 @@ function App() {
         selectedIndex={selected()}
         onChange={({ index }) => selected.set(index)}
         style={{ marginHorizontal: 16, height: 32 }}
+      />
+      <Text>{`Wi-Fi: ${wifi()}`}</Text>
+      <Switch
+        testID="wifi"
+        accessibilityLabel="Wi-Fi"
+        checked={wifi()}
+        onChange={({ checked }) => wifi.set(checked)}
+        style={{ accentColor: "#34c759" }}
+      />
+      <Switch testID="locked" accessibilityLabel="Locked" disabled />
+      <Text>{`When: ${when()}`}</Text>
+      <DateTimePicker
+        testID="when"
+        mode="dateTime"
+        value={when()}
+        min="2026-11-01T00:00"
+        max="2027-11-01T00:00"
+        minuteInterval={5}
+        disabled={false}
+        accessibilityLabel="When"
+        onChange={({ value }) => when.set(value)}
+        style={{ marginHorizontal: 16 }}
       />
       <TabBar
         testID="tab-bar"
