@@ -5,7 +5,8 @@
 //! their TypeScript declarations are generated from these types into
 //! `.nsh/types/rust-exports/native.d.ts`. On the desktops and Android the
 //! crate also registers a native component (`meter.rs`), which `App.tsx`
-//! declares with `nativeComponent`.
+//! declares with `nativeComponent`, and on macOS and iOS a live stream
+//! (`stream.rs`), which `App.tsx` plays with `<Video srcObject>`.
 
 mod account;
 mod gauge;
@@ -17,6 +18,7 @@ mod ledger;
     target_os = "android"
 ))]
 mod meter;
+mod stream;
 
 use nsh_core::prelude::*;
 
@@ -42,10 +44,17 @@ fn components(components: &nsh_platform_windows::Components) {
     meter::register(components);
 }
 
-/// The crate's native components on macOS.
+/// The crate's native components and live stream on macOS.
 #[native_components(macos)]
 fn components(components: &nsh_platform_macos::Components) {
     meter::register(components);
+    stream::register(components);
+}
+
+/// The crate's live stream on iOS.
+#[native_components(ios)]
+fn components(components: &nsh_platform_ios::Components) {
+    stream::register(components);
 }
 
 /// The crate's native components on Linux.

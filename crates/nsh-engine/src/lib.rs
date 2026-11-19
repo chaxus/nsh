@@ -4300,11 +4300,24 @@ fn release_spare_ops(ops: &mut Vec<Op>) {
 fn app_access(app: &App) -> Access {
     match app {
         App::Js(bundle) => bundle.policy.access(),
-        App::Rust(root) => Policy {
-            declared: root.capabilities_ref().cloned(),
-            ..Policy::default()
-        }
-        .access(),
+        // A Rust root without a declaration is native code the app trusts:
+        // every capability `Capabilities::all` holds, and the embedding
+        // app's streams too, which a TSX app gets only by declaring them.
+        App::Rust(root) => match root.capabilities_ref() {
+            Some(declared) => Policy {
+                declared: Some(declared.clone()),
+                ..Policy::default()
+            }
+            .access(),
+            None => {
+                let mut declared = Capabilities::all();
+                declared.streams = vec!["*".into()];
+                Access {
+                    declared,
+                    granted: None,
+                }
+            }
+        },
     }
 }
 

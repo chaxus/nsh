@@ -18,6 +18,8 @@ pub mod handoff;
 pub mod image_source;
 pub mod notifications;
 pub mod speech;
+pub mod stream;
+mod stream_audio;
 // The logger NSH's release runners and its iOS SDK install, no API of apps':
 // hidden from the docs, so it stays out of what NSH keeps compatible.
 #[doc(hidden)]

@@ -67,7 +67,14 @@ trusted: every limit and check is enforced in Rust, never in JS.
   the call of any other name before it reads the grants, since hosts may put names in paths or URLs;
   never granted without it, also in apps without a declaration (`Capabilities::all` leaves it empty), and the bundler
   warns of an app importing `host` from `nsh` without it (`bundle.rs` `ungranted_host`); the host's events need none, the
-  host sends them), `openUrl`
+  host sends them), `streams` (the embedding app's live streams a video may play, `HostStream.fromHost` and
+  `srcObject`: names of 1 to 256 bytes or prefixes ending in `*`, `true` for all; never granted without it, also in
+  apps without a declaration (`Capabilities::all` leaves it empty); `HostStream.fromHost` throws `ERR_ACCESS_DENIED`
+  (`permission` `"streams"`, `resource` the name) and the core turns a `srcObject` it does not grant, a Rust
+  component's too, into none, logged once per name; a Rust root plays the streams its `nsh.json` grants, every stream
+  when it declares no capabilities (`nsh_engine::app_access`); names the web page registers with its player
+  (`registerStream`) are checked the same way; a browser `MediaStream` an app on the web gives `srcObject` itself never
+  reaches the engine and needs none), `openUrl`
   (`openUrl` of `nsh`: `true`, or `{ "schemes": [...] }` for the schemes listed), `application` (what acts on the application as a whole:
   the main window, the application menu, the tray, global shortcuts, quitting, restarting and launching at login,
   `nsh/desktop`'s; refused commands are dropped in the core with a warning, `setLaunchAtLogin` rejects with
@@ -78,7 +85,7 @@ trusted: every limit and check is enforced in Rust, never in JS.
   read with `from_json_lenient` (the bundler warns of what it dropped, `nsh_engine::parse_capabilities` logs it), as a newer NSH may have written them: an unknown capability is not granted, an unknown key inside one drops that
   capability or `http` grant (it may be a restriction), so unknown keys never widen access; an app without the key
   retains unrestricted network, webview, status bar, clipboard, picker, share, speech, audio, URL opening, window and home directory access. Process execution, filesystem access,
-  trusted web view input and the host's functions always require explicit declarations, including standalone apps. The embedding app
+  trusted web view input, the host's functions and its streams always require explicit declarations, including standalone apps. The embedding app
   may grant less (`NshAppView.grantCapabilities` / `NshView.setGrantedCapabilities`, the same JSON): a request must be
   allowed by both (`Access`). The declaration travels with the bundle (`capabilities.json` next to it, written by
   `nsh build` / `nsh package`; the dev protocol's `Bundle` message, so development enforces the same capabilities; a change

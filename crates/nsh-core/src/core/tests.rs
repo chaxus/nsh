@@ -29695,7 +29695,7 @@ mod builders {
                 "https://before.test/",
                 "https://after.test/",
             )))
-            .child(video(pick(
+            .child(video().src(pick(
                 "https://before.test/v.mp4",
                 "https://after.test/v.mp4",
             )))
