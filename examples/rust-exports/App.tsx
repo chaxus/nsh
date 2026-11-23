@@ -5,6 +5,7 @@
 // On the desktops the crate also registers a native component, `Meter`,
 // and on macOS and iOS a live stream, which `<Video srcObject>` plays.
 import { type JSX, HostStream, mount, nativeComponent, Scroll, signal, Text, Video, View } from "nsh";
+import { Window } from "nsh/desktop";
 import { Button as BaseButton } from "nsh/base";
 import { Account, Gauge, Ledger } from "rust-exports/native";
 
@@ -181,4 +182,4 @@ function App() {
   );
 }
 
-mount(App);
+mount(() => <Window id="main">{App}</Window>);

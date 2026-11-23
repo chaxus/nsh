@@ -36,6 +36,7 @@ and the file ships with the app.
 
 ```tsx
 import { mount, signal, Text, Video, type VideoRef, View } from "nsh";
+import { Window } from "nsh/desktop";
 
 function Player() {
   const paused = signal(true);
@@ -62,7 +63,11 @@ function Player() {
   );
 }
 
-mount(Player);
+mount(() => (
+  <Window id="main">
+    <Player />
+  </Window>
+));
 ```
 
 ## Props

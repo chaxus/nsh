@@ -51,8 +51,9 @@
 //! ending in `*` (`true`: all of them). `application` lets
 //! the app act on the application as a whole (`nsh/desktop`'s main window,
 //! application menu, tray, global shortcuts, `Application.quit`, `restart`
-//! and `setLaunchAtLogin`; context menus, shown in the app's own view, and
-//! the windows `windows` grants need none); `homeDir` lets `os.homedir()` tell the
+//! and `setLaunchAtLogin`, and `nsh/mobile`'s `AppSettings.open`, the app's
+//! page in the system's settings; context menus, shown in the app's own
+//! view, and the windows `windows` grants need none); `homeDir` lets `os.homedir()` tell the
 //! user's home directory. An app without `"capabilities"` (a standalone
 //! app, its developer's own) retains unrestricted HTTP, web views, the
 //! status bar, the clipboard, the picker, the share sheet, speech
@@ -666,9 +667,10 @@ pub struct Capabilities {
     pub notifications: bool,
     /// The app may play sound (`Sound` and `AudioPlayer` of `nsh`).
     pub audio: bool,
-    /// The app may act on the application as a whole (`nsh/desktop`): the
-    /// main window, the application menu, the tray, global shortcuts,
-    /// quitting, restarting and launching at login.
+    /// The app may act on the application as a whole: the main window, the
+    /// application menu, the tray, global shortcuts, quitting, restarting
+    /// and launching at login (`nsh/desktop`), and the app's page in the
+    /// system's settings (`nsh/mobile`'s `AppSettings`).
     pub application: bool,
     /// `os.homedir()` may tell the user's home directory.
     pub home_dir: bool,
@@ -685,7 +687,8 @@ pub struct Capabilities {
     /// `None`: none.
     pub open_url: Option<OpenUrlGrant>,
     /// The windows the app may open and what they may do (`nsh/desktop`'s
-    /// `Window`); `None`: none besides its main one.
+    /// `Window`); `None`: no window of the app's own. The first window needs
+    /// the grant too: no window is privileged.
     pub windows: Option<WindowsGrant>,
 }
 
@@ -700,7 +703,7 @@ pub struct WindowsGrant {
     pub kinds: Vec<crate::desktop::WindowKind>,
     /// The levels its windows may float at; empty: every level.
     pub levels: Vec<crate::desktop::WindowLevel>,
-    /// How many windows it may have open at once besides the main one;
+    /// How many windows it may have open at once, its first window included;
     /// `None`: any number.
     pub max: Option<u32>,
     /// Overlays and click-through windows (`pointerEvents: "none"`).
@@ -1769,8 +1772,11 @@ fn valid_command(command: &str) -> bool {
         && !command.contains(['\0', '*'])
         // `absolute`, not `Path::is_absolute`: in the browser that is false for
         // every path, so `/bin/sh` refused the whole manifest and the app never
-        // started there.
-        && (absolute(Path::new(command))
+        // started there. A rooted path counts on Windows too, where
+        // `is_absolute` wants a drive (`/bin/sh`): one manifest serves every
+        // platform.
+        && (Path::new(command).has_root()
+            || absolute(Path::new(command))
             // A bare name has no drive (`C:git` is relative to the host's
             // directory on drive C).
             || (!command.contains(['/', '\\', ':']) && command != "." && command != ".."))
@@ -2521,8 +2527,8 @@ impl Access {
     /// Leaves out of `attributes` what the app's capabilities do not grant
     /// a window (an ungranted level, click-through without `overlay`) and
     /// returns their
-    /// names, for a warning. The main window needs no `windows` grant for
-    /// the rest.
+    /// names, for a warning. Without a `windows` grant only the defaults
+    /// remain; no window is privileged.
     pub fn deny_window_attributes(
         &self,
         attributes: &mut crate::desktop::WindowAttributes,
@@ -2588,7 +2594,8 @@ impl Access {
 
     /// Whether the app may act on the application as a whole: the main
     /// window, the application menu, the tray, global shortcuts, quitting,
-    /// restarting and launching at login (`nsh/desktop`).
+    /// restarting and launching at login (`nsh/desktop`), and the app's page
+    /// in the system's settings (`nsh/mobile`'s `AppSettings`).
     pub fn allows_application(&self) -> bool {
         self.each(|c| c.application)
     }
@@ -2631,6 +2638,19 @@ pub fn resolve_reference(base: &str, location: &str) -> String {
     match url::Url::parse(base).and_then(|base| base.join(location)) {
         Ok(url) => url.into(),
         Err(_) => location.to_owned(),
+    }
+}
+
+/// Whether URLs `a` and `b` have the same origin (scheme, host and port,
+/// a scheme's default port included), as WHATWG's parser reads them. A URL
+/// it cannot read, or one with an opaque origin, shares none.
+pub fn is_same_origin(a: &str, b: &str) -> bool {
+    match (url::Url::parse(a), url::Url::parse(b)) {
+        (Ok(a), Ok(b)) => {
+            let origin = a.origin();
+            origin.is_tuple() && origin == b.origin()
+        }
+        _ => false,
     }
 }
 
@@ -2696,8 +2716,6 @@ mod tests {
             ]
         );
     }
-    use std::cell::Cell;
-
     use super::*;
 
     fn caps(json: &str) -> Capabilities {
@@ -4050,7 +4068,7 @@ mod tests {
             granted: None,
         };
         let files = MediaFiles::new(&access, None, &TrustedPaths::default(), true);
-        let resolves = || RESOLVES.with(Cell::get);
+        let resolves = || RESOLVES.with(std::cell::Cell::get);
         let before = resolves();
         for outside in [
             root.join("elsewhere/x.png"),

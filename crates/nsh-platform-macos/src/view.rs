@@ -57,7 +57,9 @@ use objc2_app_kit::{
 };
 use objc2_core_foundation::{CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGContext;
-use objc2_foundation::{NSArray, NSObject, NSObjectProtocol, NSPoint, NSRange, NSRect, NSString};
+use objc2_foundation::{
+    NSArray, NSObject, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString,
+};
 use objc2_quartz_core::{CALayer, CALayerDelegate, CATransform3D, kCAGravityBottomLeft};
 
 use crate::surface::{Surface, quiet};
@@ -657,7 +659,10 @@ define_class!(
         fn view_will_start_live_resize(&self) {
             // SAFETY: NSView's own notification.
             unsafe { msg_send![super(self), viewWillStartLiveResize] }
-            if let Some(surface) = self.ivars().surface.borrow().upgrade() {
+            if let Some(surface) = self
+                .surface()
+                .or_else(|| self.ivars().window.borrow().upgrade())
+            {
                 surface.live_resize(true);
             }
         }
@@ -666,7 +671,10 @@ define_class!(
         fn view_did_end_live_resize(&self) {
             // SAFETY: NSView's own notification.
             unsafe { msg_send![super(self), viewDidEndLiveResize] }
-            if let Some(surface) = self.ivars().surface.borrow().upgrade() {
+            if let Some(surface) = self
+                .surface()
+                .or_else(|| self.ivars().window.borrow().upgrade())
+            {
                 surface.live_resize(false);
             }
         }
@@ -832,7 +840,7 @@ define_class!(
         #[unsafe(method(cursorUpdate:))]
         fn cursor_update(&self, event: &NSEvent) {
             match self.input_surface() {
-                Some(surface) => crate::input::cursor_update(&surface),
+                Some(surface) => crate::input::cursor_update(&surface, Some(event)),
                 // SAFETY: NSView's own handling (passes it up).
                 None => unsafe { msg_send![super(self), cursorUpdate: event] },
             }
@@ -1447,6 +1455,9 @@ impl ViewObj {
             }
         }
         if let Some(surface) = self.input_surface() {
+            if crate::input::saw_hosted(&surface, event) {
+                return;
+            }
             // Drags may scroll or pan (a frame for the performance
             // monitor); the rest changes the screen through the engine.
             let drag = matches!(
@@ -1471,6 +1482,7 @@ impl ViewObj {
         }
         let options = NSTrackingAreaOptions::MouseMoved
             | NSTrackingAreaOptions::MouseEnteredAndExited
+            | NSTrackingAreaOptions::CursorUpdate
             | NSTrackingAreaOptions::ActiveAlways
             | NSTrackingAreaOptions::InVisibleRect;
         // SAFETY: the owner (this view) outlives the tracking area, which
@@ -1672,6 +1684,19 @@ pub(crate) fn pressing(mtm: MainThreadMarker) -> bool {
     )
 }
 
+/// Whether the event AppKit handles (or the test agent hands the window)
+/// is a left mouse press.
+pub(crate) fn left_pressing(mtm: MainThreadMarker) -> bool {
+    use objc2_app_kit::NSApplication;
+    scripted_type()
+        .or_else(|| {
+            NSApplication::sharedApplication(mtm)
+                .currentEvent()
+                .map(|e| e.r#type())
+        })
+        .is_some_and(|t| t == NSEventType::LeftMouseDown)
+}
+
 /// Whether the event AppKit handles is a mouse wheel or trackpad scroll.
 fn scrolling(mtm: MainThreadMarker) -> bool {
     scripted_type()
@@ -1691,7 +1716,7 @@ thread_local! {
 }
 
 /// The type of the event the test agent hands its window now.
-fn scripted_type() -> Option<NSEventType> {
+pub(crate) fn scripted_type() -> Option<NSEventType> {
     SCRIPTED.with_borrow(|e| e.as_ref().map(|e| e.r#type()))
 }
 
@@ -2230,9 +2255,14 @@ impl NshView {
         }
     }
 
-    /// The scale of its window's backing (2 before it has one).
+    /// Device pixels per root point, including the host's bounds scale.
+    /// NSH's own scroll zooms are counted by `inherited_scale` instead.
     fn backing_scale(&self) -> CGFloat {
-        self.ns().window().map_or(2.0, |w| w.backingScaleFactor())
+        let mut root = self.clone();
+        while let Some(parent) = root.parent_view() {
+            root = parent;
+        }
+        backing_scale_of(root.ns())
     }
 
     /// The scale its own transform's 2D axes apply, or 1 without one.
@@ -2937,6 +2967,21 @@ impl crate::sight::Tree for Planned {
 fn snap_to_scale(offset: f32, scale: CGFloat) -> CGFloat {
     let scale = scale.max(1.0);
     (offset as CGFloat * scale).round() / scale
+}
+
+/// Device pixels per point in the view's coordinates, including ancestor
+/// bounds scaling. Detached views use the usual 2x fallback.
+pub(crate) fn backing_scale_of(view: &NSView) -> CGFloat {
+    if view.window().is_none() {
+        return 2.0;
+    }
+    let size = view.convertSizeToBacking(NSSize::new(1.0, 1.0));
+    let scale = size.width.abs().max(size.height.abs());
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        2.0
+    }
 }
 
 #[cfg(test)]

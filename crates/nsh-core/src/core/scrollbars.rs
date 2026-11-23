@@ -16,8 +16,6 @@
 //! just above it instead, at its frame: the platform reports how far the
 //! text scrolled ([`Core::set_input_scroll`]) and takes the bar's scrolls.
 
-use std::sync::Arc;
-
 use super::{Core, Key, Kind, NO_KEY, dirty, list::StickyRange};
 use crate::{
     NodeId, ScrollbarSetting, element::BuiltInScrollbar, geometry::Points, text::TextEngine,
@@ -83,7 +81,10 @@ impl<M: TextEngine> Core<M> {
                 ScrollbarSetting::Shown => {
                     (Some(None), self.builtin_scrollbars.as_ref().map(|b| b.0))
                 }
-                ScrollbarSetting::Themed(theme) => (Some(Some(theme.clone())), themed),
+                theme @ ScrollbarSetting::Themed(_) => (Some(Some(theme.clone())), themed),
+                theme @ ScrollbarSetting::ThemeValue(value) => {
+                    (Some(Some(theme.clone())), Some(value.source()))
+                }
                 ScrollbarSetting::Hidden => (None, None),
             };
             let wanted = wanted.filter(|_| source.is_some());
@@ -118,7 +119,7 @@ impl<M: TextEngine> Core<M> {
     fn make_scrollbar(
         &mut self,
         key: Key,
-        own: Option<Arc<crate::JsonValue>>,
+        own: Option<ScrollbarSetting>,
         source: crate::element::ScrollbarSource,
     ) {
         let node = &self.nodes[key as usize];
@@ -139,7 +140,14 @@ impl<M: TextEngine> Core<M> {
         let Some(el) = source(&BuiltInScrollbar {
             target,
             horizontal,
-            theme: own.clone(),
+            theme: match &own {
+                Some(ScrollbarSetting::Themed(json)) => Some(json.clone()),
+                _ => None,
+            },
+            theme_value: match &own {
+                Some(ScrollbarSetting::ThemeValue(value)) => Some(value.theme().clone()),
+                _ => None,
+            },
             app_theme: self.builtin_scrollbars.as_ref().map(|b| b.1.clone()),
         }) else {
             return;
@@ -235,7 +243,7 @@ impl<M: TextEngine> Core<M> {
             // An input's bar follows the input where it moves.
             let bar_node = &self.nodes[bar as usize];
             let moved = (bar_node.beside != NO_KEY && bar_node.frame.origin != origin)
-                || bar_node.emitted.is_some_and(|(was, _)| was != at);
+                || self.layout.unrounded_layout(layout).location != at;
             if restyled || moved || self.layout.dirty(layout) {
                 self.layout_root(
                     layout,
@@ -244,7 +252,10 @@ impl<M: TextEngine> Core<M> {
                         height: taffy::AvailableSpace::Definite(size.height.0),
                     },
                 );
-                self.emit_frames_in(bar, false, at);
+                let mut placed = *self.layout.unrounded_layout(layout);
+                placed.location = at;
+                self.layout.set_unrounded(layout, placed);
+                self.emit_frames_in(bar, false, super::Origin::default());
             }
         }
     }
