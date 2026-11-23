@@ -23,6 +23,8 @@ pub mod image_source;
 pub mod network;
 pub mod notifications;
 pub mod speech;
+pub mod stream;
+mod stream_audio;
 // How drawn text splits into screen reader elements on macOS and iOS, no API
 // of apps': hidden from the docs, so it stays out of what NSH keeps compatible.
 #[doc(hidden)]

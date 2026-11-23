@@ -53,6 +53,8 @@ mod shader;
 // as not supported.
 #[cfg_attr(not(feature = "sound"), path = "sound_off.rs")]
 mod sound;
+mod stream;
+mod stream_audio;
 mod surface;
 #[cfg(feature = "dev")]
 mod synth;
@@ -82,4 +84,5 @@ pub use crate::{
     image::AssetBase,
     links::set_exec_args,
     native::{ComponentContext, ComponentFactory, Components, NativeComponent},
+    stream::{DmabufFrame, DmabufPlane, DmabufRelease, StreamHandle},
 };

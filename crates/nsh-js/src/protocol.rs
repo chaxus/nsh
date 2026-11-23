@@ -562,6 +562,10 @@ impl<'r, 'js> HostInput for Js<'r, 'js> {
     fn node(&self) -> Option<NodeId> {
         crate::dom::node_id(self.value.ctx().as_raw().as_ptr(), self.value.as_raw())
     }
+
+    fn class_instance(&self) -> Option<std::rc::Rc<dyn nsh_core::element::ClassInstance>> {
+        crate::classes::instance_of(self.value.ctx().as_raw().as_ptr(), self.value.as_raw())
+    }
 }
 
 /// The op setting prop `name` to `value`: a style, a registered native

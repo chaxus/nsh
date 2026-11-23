@@ -535,6 +535,12 @@ function newHistorySession() {
   return `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
 }
 
+/** A media element's duration for events: a live stream's is `Infinity`,
+ * which JSON cannot carry, and an unknown one `NaN`; both are 0. */
+function mediaDuration(media) {
+  return Number.isFinite(media.duration) ? media.duration : 0;
+}
+
 /** The current entry's place in the tab's history (the Navigation API's
  * `navigation.currentEntry.index`), `null` where the browser has no
  * Navigation API. */
@@ -1143,6 +1149,12 @@ class Player {
     // right-to-left layout), which replaces its inline style.
     container.append(this.root);
     this.views = new Map();
+    // `<Video srcObject>`'s streams of the browser's own by view id: live
+    // objects the app's code hands over directly, never through the engine.
+    this.srcObjects = new Map();
+    // The streams the page registered by name (`registerStream`), which an
+    // NSH `HostStream` names.
+    this.hostStreams = new Map();
     this.mouseTracked = new Set();
     /** Views listening to `onWheel`; wheels look for none without. */
     this.wheelTracked = new Set();
@@ -1902,6 +1914,7 @@ class Player {
     root.textContent = "";
     root.append(this.live);
     this.views.clear();
+    this.srcObjects.clear();
     this.mouseTracked.clear();
     this.wheelTracked.clear();
     root._id = ROOT_ID;
@@ -2580,6 +2593,8 @@ class Player {
     }
     el._id = id;
     el._kind = kind;
+    // A stream set before the view was made.
+    if (el._video) this.videoSource(el);
     el._events = new Set();
     el._animation = {};
     el._frame = null;
@@ -2651,7 +2666,8 @@ class Player {
     for (const v of this.leftPlaying) {
       if (!el.contains(v)) continue;
       this.leftPlaying.delete(v);
-      if (v._paused === false && v._src && v._video.paused && v.isConnected) this.playVideo(v, v._video);
+      // `playVideo` checks it has a source: its `src` or a stream.
+      if (v._paused === false && v._video.paused && v.isConnected) this.playVideo(v);
     }
   }
 
@@ -2751,6 +2767,8 @@ class Player {
       // A removed media element keeps playing until it is collected.
       clearInterval(el._progressTimer);
       el._video.pause();
+      el._video.srcObject = null;
+      this.srcObjects.delete(id);
       el._video.removeAttribute("src");
       el._video.load();
     }
@@ -7308,21 +7326,20 @@ class Player {
     this.webNavigation(el, "onLoad", false);
   }
 
-  op_video([, id, src, paused, muted, volume, rate, repeat, fit, controls, progressInterval]) {
+  op_video([, id, src, paused, muted, volume, rate, repeat, fit, controls, progressInterval, stream]) {
     const el = this.view(id);
     const video = el?._video;
     if (!video) return;
     const url = src ? this.asset(src) : "";
-    // `paused` is acted on when it changes (or for a new source): `play()`
-    // on a video that ended starts it over, and one its controls paused
-    // would play on, whenever another prop (the volume, say) changed.
-    const toggled = url !== el._src || paused !== el._paused;
+    const named = stream ?? null;
+    // `paused` is acted on when it changes (or for a new source or stream):
+    // `play()` on a video that ended starts it over, and one its controls
+    // paused would play on, whenever another prop (the volume, say) changed.
+    const toggled = url !== el._src || named !== el._stream || paused !== el._paused;
     el._paused = paused;
-    if (url !== el._src) {
-      el._src = url;
-      if (url) video.src = url;
-      else video.removeAttribute("src");
-    }
+    el._src = url;
+    el._stream = named;
+    this.videoSource(el);
     el._progressInterval = progressInterval > 0 ? progressInterval : 250;
     video.muted = muted;
     video.volume = Math.min(1, Math.max(0, volume));
@@ -7332,11 +7349,77 @@ class Player {
     video.className = `nsh-fill nsh-fit-${fit}`;
     if (!toggled) return;
     if (paused) video.pause();
-    else if (url && video.paused) this.playVideo(el, video);
+    else this.playVideo(el);
   }
 
-  /** Plays `<Video>` `el`'s media element `video`, as its props say. */
-  playVideo(el, video) {
+  /**
+   * Registers `stream`, a `MediaStream`, as `name`: the videos whose
+   * `srcObject` is `HostStream.fromHost(name)` play it; `null` takes it
+   * away. The page (or its `web.host` module) owns the stream and stops its
+   * tracks.
+   */
+  registerStream(name, stream) {
+    if (typeof name !== "string" || !name) throw new TypeError("registerStream: a stream's name is a non-empty string");
+    if (stream != null && typeof stream !== "object") throw new TypeError("registerStream: a stream is a MediaStream or null");
+    // Names under `nsh/` are NSH's own, refused on every platform
+    // (`nsh_core::stream::RESERVED_PREFIX`).
+    if (name.startsWith("nsh/")) {
+      if (!this.refusedStreams?.has(name)) {
+        (this.refusedStreams ??= new Set()).add(name);
+        console.warn(`registerStream: \`${name}\` is a name NSH keeps for itself`);
+      }
+      return;
+    }
+    if (stream) this.hostStreams.set(name, stream);
+    else this.hostStreams.delete(name);
+    for (const el of this.views.values()) {
+      if (el._video && el._stream === name) {
+        this.videoSource(el);
+        this.playVideo(el);
+      }
+    }
+  }
+
+  /** Sets `<Video srcObject>`'s stream of view `id`; `null` clears it. */
+  setVideoSrcObject(id, stream) {
+    if (stream) this.srcObjects.set(id, stream);
+    else this.srcObjects.delete(id);
+    const el = this.view(id);
+    if (!el?._video) return;
+    this.videoSource(el);
+    this.playVideo(el);
+  }
+
+  /** The stream a video plays: its own (the browser's), or the one the page
+   * registered under its `HostStream`'s name. */
+  videoStream(el) {
+    return this.srcObjects.get(el._id) ?? (el._stream ? this.hostStreams.get(el._stream) : null) ?? null;
+  }
+
+  /** Gives a video its stream or, without one, its `src`: a stream wins over `src`, as in HTML. */
+  videoSource(el) {
+    const video = el._video;
+    const stream = this.videoStream(el);
+    // A name nothing registered shows nothing (said once per name, as a
+    // native component the web does not have: `op_comp`).
+    const missing = el._stream && !stream ? el._stream : null;
+    if (missing && !this.missingStreams?.has(missing)) {
+      (this.missingStreams ??= new Set()).add(missing);
+      console.warn(`[nsh] no stream is registered as "${missing}" (registerStream): the video shows nothing`);
+    }
+    if ((video.srcObject ?? null) !== stream) video.srcObject = stream;
+    const src = stream || missing ? "" : (el._src ?? "");
+    if ((video.getAttribute("src") ?? "") !== src) {
+      if (src) video.src = src;
+      else video.removeAttribute("src");
+    }
+  }
+
+  /** Plays a video that has a source (its stream or `src`) and is not paused by
+   * its `paused` prop. */
+  playVideo(el) {
+    const video = el._video;
+    if (el._paused !== false || !video.paused || !(this.videoStream(el) || (el._src && !el._stream))) return;
     const src = el._src;
     video.play().catch((err) => {
       if (err?.name !== "NotAllowedError") return;
@@ -7353,7 +7436,7 @@ class Player {
   /** `<Video>`'s events from the media element's. */
   wireVideo(el, video) {
     const emit = (name, payload) => el._events.has(name) && this.event(el._id, name, payload);
-    const progress = () => emit("onProgress", { currentTime: video.currentTime, duration: video.duration || 0 });
+    const progress = () => emit("onProgress", { currentTime: video.currentTime, duration: mediaDuration(video) });
     const stopProgress = () => {
       clearInterval(el._progressTimer);
       el._progressTimer = 0;
@@ -7365,10 +7448,10 @@ class Player {
       emit("onBuffer", { isBuffering: on });
     };
     video.addEventListener("loadstart", () => {
-      if (video.getAttribute("src")) emit("onLoadStart");
+      if (video.getAttribute("src") || video.srcObject) emit("onLoadStart");
     });
     video.addEventListener("loadedmetadata", () =>
-      emit("onLoad", { duration: video.duration || 0, width: video.videoWidth, height: video.videoHeight }));
+      emit("onLoad", { duration: mediaDuration(video), width: video.videoWidth, height: video.videoHeight }));
     video.addEventListener("playing", () => {
       buffer(false);
       stopProgress();
@@ -7391,7 +7474,7 @@ class Player {
     video.addEventListener("error", () => {
       stopProgress();
       const e = video.error;
-      if (e && video.getAttribute("src")) emit("onError", { message: e.message || `media error ${e.code}` });
+      if (e && (video.getAttribute("src") || video.srcObject)) emit("onError", { message: e.message || `media error ${e.code}` });
     });
   }
 
@@ -7481,12 +7564,13 @@ class Player {
         break;
       case "seek": {
         const video = el?._video;
-        if (!video) break;
+        // A live stream has no timeline to seek in.
+        if (!video || video.srcObject) break;
         const ended = video.ended;
         video.currentTime = args[0];
         // The browser paused it at its end: one the app has not paused
         // plays on from where it was sought, as on the other platforms.
-        if (ended && el._paused === false && !video.loop) this.playVideo(el, video);
+        if (ended && el._paused === false && !video.loop) this.playVideo(el);
         break;
       }
       case "notificationPermission": this.notificationPermission(args[0], args[1]); break;

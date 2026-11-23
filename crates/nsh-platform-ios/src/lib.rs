@@ -119,6 +119,7 @@ mod web;
 mod zoom;
 
 pub use nsh_engine::{Bundle, ByteSize, CacheLocation, CacheOptions, CachePolicy, Root};
+pub use nsh_platform_apple::stream::{CVPixelBufferRef, StreamHandle};
 pub use picker::prepare_image;
 pub use presenting::presenting_controller;
 

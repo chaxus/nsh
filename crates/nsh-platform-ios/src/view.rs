@@ -138,6 +138,19 @@ impl AppView {
             .register(name, factory);
     }
 
+    /// Registers live stream `name` (`HostStream.fromHost(name)` in JS,
+    /// played by `<Video srcObject>`): push its frames to the handle, from
+    /// any thread. Applies to the videos naming it, now or later. Main
+    /// thread.
+    pub fn register_stream(&self, name: &str) -> crate::StreamHandle {
+        self.inner
+            .state
+            .borrow()
+            .options
+            .components
+            .register_stream(name)
+    }
+
     /// Watches the app's `<Scroll>` whose `nativeID` is `native_id`, for native
     /// UI of the host that follows or drives the app's scrolling in the frame
     /// of the scroll, without JS (a sheet under the content, say): `watcher`
